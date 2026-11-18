@@ -4111,6 +4111,7 @@ mod tests {
                 busy_percent: vec![10.0, 25.0, 50.0, 100.0],
                 state_percent: vec![CpuTimes::default(); 4],
                 frequency_mhz: Vec::new(),
+                offline: Vec::new(),
             },
             memory: Memory {
                 total: Metric::available(16.0 * GIB, Unit::Bytes),
