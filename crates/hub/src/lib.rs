@@ -40,6 +40,12 @@ const FRESH_MS: u128 = 10_000;
 /// agent is ~43k rows, comfortably small for SQLite.
 const RETENTION_MS: u128 = 24 * 60 * 60 * 1000;
 
+/// The longest history window one request may ask for, and the window
+/// a request without `seconds` gets: an hour, the most the app reads.
+/// Longer windows load every row into memory and serialize them in one
+/// answer.
+pub const MAX_HISTORY_SECONDS: u64 = 3600;
+
 /// How often the retention prune runs.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
@@ -184,9 +190,11 @@ impl Store {
     }
 
     /// Delete rows older than `older_than_ms` milliseconds; the
-    /// retention task's worker. The age is relative to now.
+    /// retention task's worker. The argument is an age relative to
+    /// now, not a timestamp ([`HubState::prune_expired`] passes the
+    /// retention window).
     pub async fn prune(&self, older_than_ms: u64) -> Result<(), sqlx::Error> {
-        let cutoff = (now_ms() as i64) - (older_than_ms as i64);
+        let cutoff = now_ms().saturating_sub(older_than_ms) as i64;
         sqlx::query("DELETE FROM samples WHERE ts_ms < ?")
             .bind(cutoff)
             .execute(&self.pool)
@@ -220,6 +228,11 @@ pub struct HubState {
     /// TLS serving flips this on, exactly as the agent does.
     pub enforce_auth: bool,
     pub statuses: Mutex<HashMap<String, AgentStatus>>,
+    /// The newest polled sample per agent name, process list included.
+    /// Stored history rows drop the list (it is most of each sample's
+    /// size); a snapshot is served from here, and from the store only
+    /// before the first poll since start.
+    pub latest: Mutex<HashMap<String, Sample>>,
 }
 
 impl HubState {
@@ -242,6 +255,7 @@ impl HubState {
             auth: Mutex::new(auth),
             enforce_auth,
             statuses: Mutex::new(statuses),
+            latest: Mutex::new(HashMap::new()),
         })
     }
 
@@ -262,12 +276,23 @@ impl HubState {
     async fn record(&self, agent: &AgentConfig, result: Result<Sample, String>) {
         match result {
             Ok(sample) => {
-                if let Ok(payload) = serde_json::to_string(&sample) {
+                // History keeps the trend, not the process table: the
+                // list is most of a sample's size and only the latest
+                // one is ever shown (the agent's ring does the same).
+                let stored = Sample {
+                    processes: Vec::new(),
+                    ..sample.clone()
+                };
+                if let Ok(payload) = serde_json::to_string(&stored) {
                     let _ = self
                         .store
-                        .insert(&agent.name, sample.timestamp_ms, &payload)
+                        .insert(&agent.name, stored.timestamp_ms, &payload)
                         .await;
                 }
+                self.latest
+                    .lock()
+                    .expect("latest")
+                    .insert(agent.name.clone(), sample);
                 let mut statuses = self.statuses.lock().expect("statuses");
                 let status = statuses.entry(agent.name.clone()).or_default();
                 status.last_ok_ms = Some(now_ms());
@@ -279,6 +304,12 @@ impl HubState {
                 status.last_error = Some(error);
             }
         }
+    }
+
+    /// Delete history past the retention window: the retention task's
+    /// one call, kept here so tests run exactly what the task runs.
+    pub async fn prune_expired(&self) -> Result<(), sqlx::Error> {
+        self.store.prune(RETENTION_MS as u64).await
     }
 
     /// The state string for `name` in `/v1/hosts`.
@@ -468,7 +499,12 @@ async fn snapshot(State(state): State<Arc<HubState>>, query: Query<HostQuery>) -
         )
             .into_response();
     }
-    match state.store.latest(&host).await {
+    let in_memory = state.latest.lock().expect("latest").get(&host).cloned();
+    let latest = match in_memory {
+        Some(sample) => Ok(Some(sample)),
+        None => state.store.latest(&host).await,
+    };
+    match latest {
         Ok(Some(sample)) => Json(Envelope {
             protocol: ztop_core::client::PROTOCOL_VERSION,
             body: json!({ "sample": sample }),
@@ -504,7 +540,10 @@ async fn history(State(state): State<Arc<HubState>>, query: Query<HostQuery>) ->
         )
             .into_response();
     }
-    let seconds = query.seconds.unwrap_or(u64::MAX);
+    let seconds = query
+        .seconds
+        .unwrap_or(MAX_HISTORY_SECONDS)
+        .min(MAX_HISTORY_SECONDS);
     match state.store.since(host, seconds).await {
         Ok(samples) => Json(Envelope {
             protocol: ztop_core::client::PROTOCOL_VERSION,
@@ -650,8 +689,9 @@ fn spawn_pollers(state: Arc<HubState>) {
     let prune_state = state.clone();
     tokio::spawn(async move {
         loop {
-            let cutoff = now_ms().saturating_sub(RETENTION_MS as u64);
-            let _ = prune_state.store.prune(cutoff).await;
+            if let Err(error) = prune_state.prune_expired().await {
+                eprintln!("ztop-hub: the retention prune failed: {error}");
+            }
             tokio::time::sleep(PRUNE_INTERVAL).await;
         }
     });
@@ -728,6 +768,7 @@ mod tests {
             auth: Mutex::new(auth::Auth::in_memory()),
             enforce_auth: false,
             statuses: Mutex::new(HashMap::new()),
+            latest: Mutex::new(HashMap::new()),
         })
     }
 
@@ -812,6 +853,111 @@ mod tests {
             store.since("host-b", u64::MAX).await.expect("since").len(),
             0
         );
+    }
+
+    /// Regression: the retention task passed an absolute cutoff
+    /// (`now - 24h`) to `prune`, which expects an age and subtracted it
+    /// from now again, so the cutoff landed a day after 1970 and
+    /// nothing was ever deleted. The unit test above passed an age and
+    /// never saw it. This goes through the exact call the task makes.
+    #[tokio::test]
+    async fn the_retention_task_deletes_rows_past_the_window() {
+        let state = hub_with(two_agents(), false).await;
+        let now = now_ms();
+        let three_days = 3 * 24 * 60 * 60 * 1000;
+        for ts in [now - three_days, now - 1000] {
+            let sample = a_sample("host-a", ts, 1.0);
+            state
+                .store
+                .insert("host-a", ts, &serde_json::to_string(&sample).unwrap())
+                .await
+                .expect("insert");
+        }
+        state.prune_expired().await.expect("prune");
+        let left = state.store.since("host-a", u64::MAX).await.expect("since");
+        assert_eq!(left.len(), 1, "the 3-day-old row must be gone");
+        assert_eq!(left[0].timestamp_ms, now - 1000);
+    }
+
+    fn a_process(pid: u32) -> ztop_core::model::Process {
+        ztop_core::model::Process {
+            pid,
+            parent: None,
+            user: "alice".to_string(),
+            state: "S".to_string(),
+            name: format!("worker-{pid}"),
+            cpu_percent: 0.0,
+            mem_percent: 0.0,
+            virtual_bytes: 0,
+            resident_bytes: 0,
+            threads: 1,
+            priority: None,
+            nice: None,
+            shared_bytes: None,
+            total_time_ns: None,
+            start_time_secs: None,
+            processor: None,
+            command: None,
+            is_thread: false,
+            kernel_thread: false,
+            io: ztop_core::model::ProcessIo::default(),
+            container: None,
+        }
+    }
+
+    /// Regression: each polled sample was stored verbatim, process
+    /// list included (66 KB for a 142-process host, about 2.9 GB per
+    /// agent per day). Stored rows now drop the list; the latest
+    /// sample keeps it, so a snapshot through the hub still shows
+    /// processes.
+    #[tokio::test]
+    async fn stored_history_drops_process_lists_but_the_snapshot_keeps_them() {
+        let state = hub_with(two_agents(), false).await;
+        let agent = state.config.agents[0].clone();
+        let mut sample = a_sample("host-a", now_ms(), 1.0);
+        sample.processes = (100..110).map(a_process).collect();
+        state.record(&agent, Ok(sample)).await;
+        let stored = state.store.since("host-a", 60).await.expect("since");
+        assert_eq!(stored.len(), 1);
+        assert!(
+            stored[0].processes.is_empty(),
+            "history rows keep no process list"
+        );
+        let response = get(router(state), "/v1/snapshot?host=host-a").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_str(&text(response).await).expect("json");
+        assert_eq!(
+            value["sample"]["processes"].as_array().map(Vec::len),
+            Some(10)
+        );
+    }
+
+    /// `GET /v1/history` with no `seconds` loaded every stored row into
+    /// memory. The window is capped at an hour, the most the app asks
+    /// for, and the answer says which window it served.
+    #[tokio::test]
+    async fn history_windows_are_capped() {
+        let state = hub_with(two_agents(), false).await;
+        let now = now_ms();
+        for ts in [now - 2 * 60 * 60 * 1000, now - 1000] {
+            let sample = a_sample("host-a", ts, 1.0);
+            state
+                .store
+                .insert("host-a", ts, &serde_json::to_string(&sample).unwrap())
+                .await
+                .expect("insert");
+        }
+        for uri in [
+            "/v1/history?host=host-a",
+            "/v1/history?host=host-a&seconds=999999",
+        ] {
+            let response = get(router(state.clone()), uri).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let value: serde_json::Value =
+                serde_json::from_str(&text(response).await).expect("json");
+            assert_eq!(value["seconds"], MAX_HISTORY_SECONDS, "{uri}");
+            assert_eq!(value["samples"].as_array().map(Vec::len), Some(1), "{uri}");
+        }
     }
 
     #[tokio::test]
