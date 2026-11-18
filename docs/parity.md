@@ -320,7 +320,9 @@ Check an item only when it works and a test or a recorded check shows it. Add th
 - [x] `ztop hub` with SQLite history, serving the same protocol
   - `ztop hub` polls every agent in `agents.json` (one
     `spawn_blocking` `RemoteCollector` per agent on the agent's own
-    cadence), files each sample verbatim in SQLite via sqlx
+    cadence), files each sample in SQLite via sqlx without its
+    process list (the latest full sample stays in memory for
+    snapshots; decision 0062)
     (migration `0001_samples`, index `samples_host_ts`, decision
     0004), and serves the agent's routes with one addition —
     `?host=` on snapshot and history plus `/v1/hosts` (fleet listing
@@ -334,7 +336,12 @@ Check an item only when it works and a test or a recorded check shows it. Add th
     `history_serves_the_stored_window`,
     `enforced_hub_rejects_unpaired_reads_and_pairs`,
     `hosts_lists_the_fleet_with_states`,
-    `config_rejects_duplicates_bad_targets_and_bad_pins`.
+    `config_rejects_duplicates_bad_targets_and_bad_pins`. Retention
+    (24 h) and the one-hour history cap are tested through the
+    production calls (decision 0062):
+    `the_retention_task_deletes_rows_past_the_window`,
+    `stored_history_drops_process_lists_but_the_snapshot_keeps_them`,
+    `history_windows_are_capped`.
 - [x] launchd and systemd services
   - `packaging/launchd/com.ztop.agent.plist` and
     `packaging/systemd/ztop-agent.service` run the agent as a
