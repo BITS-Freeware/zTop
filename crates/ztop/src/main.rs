@@ -1,0 +1,494 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! The `ztop` command line: one binary for the TUI, capture, the agent and the hub.
+
+use std::error::Error;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+use ztop_core::collector::Collector;
+
+/// The `ztop` command line.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ztop",
+    version,
+    about = "A system monitor for one host and your fleet, in a terminal."
+)]
+struct Cli {
+    /// Show only these process ids, comma separated (htop's `-p`).
+    #[arg(short = 'p', long, value_delimiter = ',')]
+    pids: Vec<u32>,
+
+    /// Seconds between samples; at least 0.1 (htop's `-d`).
+    #[arg(short = 'd', long, default_value_t = 1.0)]
+    delay: f64,
+
+    /// Show only this user's processes at startup (htop's `-u`).
+    #[arg(short = 'u', long)]
+    user: Option<String>,
+
+    /// Sort by this key at startup: one of pid, user, cpu, mem, res, virt,
+    /// shr, pri, nice, time, start, core, ppid, name, command (htop's `-s`).
+    #[arg(short = 's', long)]
+    sort: Option<String>,
+
+    /// Start in tree view (htop's `-t`).
+    #[arg(short = 't', long)]
+    tree: bool,
+
+    /// Render without colors, ignoring the saved theme for this run.
+    #[arg(long)]
+    no_color: bool,
+
+    /// Refuse every action that changes the system: signals and renice
+    /// are disabled for this run.
+    #[arg(long)]
+    readonly: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Record this host's raw inputs as a fixture for collector tests.
+    Capture {
+        /// Directory to write the fixture into.
+        #[arg(long, default_value = "capture")]
+        out: PathBuf,
+    },
+    /// Serve the agent protocol on the loopback interface.
+    Agent {
+        /// TCP port to listen on.
+        #[arg(long, default_value_t = 7100)]
+        port: u16,
+        /// Address to bind. Loopback by default; anything wider needs
+        /// --tls, so no unauthenticated metrics ever leave the machine.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Show a pairing code a client can trade for a token.
+        #[arg(long)]
+        pair: bool,
+        /// Let paired tokens send signals and renice here.
+        #[arg(long)]
+        allow_control: bool,
+        /// Skip the Bonjour advertisement that --tls turns on.
+        #[arg(long)]
+        no_advertise: bool,
+        /// Serve HTTPS with a self-signed certificate and require tokens.
+        #[arg(long)]
+        tls: bool,
+    },
+    /// Serve the hub protocol, polling the agents in --agents.
+    Hub {
+        /// TCP port to listen on.
+        #[arg(long, default_value_t = 7101)]
+        port: u16,
+        /// The agents to watch, as a JSON file of
+        /// {"agents":[{"name","target","pin"?,"token"?}]}.
+        #[arg(long)]
+        agents: Option<PathBuf>,
+        /// Where the history lives (SQLite); default under the state
+        /// directory.
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Address to bind; anything wider than loopback needs --tls.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Print a pairing code so a client can pair with the hub.
+        #[arg(long)]
+        pair: bool,
+        /// Serve HTTPS with a self-signed certificate and enforce
+        /// tokens.
+        #[arg(long)]
+        tls: bool,
+    },
+    /// Drive the TUI from a remote agent or hub.
+    Connect {
+        /// Target to connect to, e.g. `127.0.0.1:7100`.
+        target: String,
+        /// Connect over TLS with the agent's self-signed certificate,
+        /// verified against `--pin`.
+        #[arg(long)]
+        tls: bool,
+        /// The agent's certificate fingerprint, exactly as the agent
+        /// printed it: `SHA256:<64 hex>`.
+        #[arg(long, requires = "tls")]
+        pin: Option<String>,
+        /// The agent's pairing code, traded once for a token and then
+        /// saved under the state directory for this host.
+        #[arg(long, requires = "tls")]
+        code: Option<String>,
+        /// Read one sample, print a one-line summary, and exit: the
+        /// non-interactive client for scripts and CI pairing checks.
+        #[arg(long)]
+        once: bool,
+    },
+    /// Render one TUI frame from a recorded fixture and print it.
+    Replay {
+        /// Fixture directory to load (a `ztop capture` output).
+        dir: PathBuf,
+    },
+}
+
+/// Build the run flags from the CLI; `readonly` is passed in so
+/// `connect` can force observation-only regardless of the flag.
+fn flags_from(cli: &Cli, readonly: bool) -> Result<ztop_tui::RunFlags, Box<dyn Error>> {
+    if cli.delay < ztop_tui::MIN_DELAY.as_secs_f64() {
+        return Err(format!(
+            "delay must be at least {} seconds",
+            ztop_tui::MIN_DELAY.as_secs_f64()
+        )
+        .into());
+    }
+    Ok(ztop_tui::RunFlags {
+        readonly,
+        user: cli.user.clone(),
+        sort: match &cli.sort {
+            Some(name) => Some(name.parse()?),
+            None => None,
+        },
+        delay: std::time::Duration::from_secs_f64(cli.delay),
+    })
+}
+
+/// One gibibyte, for the `--once` summary line.
+const GIB: f64 = 1_073_741_824.0;
+
+/// `connect --once`: read the agent's latest sample, print a one-line
+/// summary, and exit. The CPU figure is the agent's own measurement over
+/// its last sampling interval, so a lone read is still a live rate;
+/// memory and swap render as `used/total GiB` with `-` for a value the
+/// host does not report.
+fn connect_once(
+    mut collector: ztop_core::client::RemoteCollector,
+    target: &str,
+) -> Result<(), Box<dyn Error>> {
+    let sample = collector.sample()?;
+    let cpu = if sample.cpu.busy_percent.is_empty() {
+        "-".to_string()
+    } else {
+        let mean =
+            sample.cpu.busy_percent.iter().sum::<f64>() / sample.cpu.busy_percent.len() as f64;
+        format!("{mean:.1}%")
+    };
+    let seconds = if sample.uptime.available {
+        let total = sample.uptime.value.max(0.0) as u64;
+        format!(
+            "{}:{:02}:{:02}",
+            total / 3600,
+            (total % 3600) / 60,
+            total % 60
+        )
+    } else {
+        "-".to_string()
+    };
+    let used = |value: &ztop_core::model::Metric| {
+        if value.available {
+            format!("{:.1}", value.value / GIB)
+        } else {
+            "-".to_string()
+        }
+    };
+    let system = if sample.system.is_empty() {
+        "system unknown".to_string()
+    } else {
+        sample.system.clone()
+    };
+    println!(
+        "{target} · {system} · up {seconds} · cpu {cpu} · mem {}/{} GiB · swap {}/{} GiB · load {:.2} {:.2} {:.2} · {} processes",
+        used(&sample.memory.used),
+        used(&sample.memory.total),
+        used(&sample.memory.swap_used),
+        used(&sample.memory.swap_total),
+        sample.load_avg[0],
+        sample.load_avg[1],
+        sample.load_avg[2],
+        sample.processes.len(),
+    );
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("ztop: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
+    match cli.command {
+        None => {
+            // The live sampler runs on Linux and macOS; other platforms get
+            // a placeholder that reports itself unavailable in the TUI
+            // header.
+            #[cfg(target_os = "linux")]
+            let mut collector = ztop_core::linux::LinuxCollector::default();
+            #[cfg(target_os = "macos")]
+            let mut collector = ztop_core::macos_live::MacOsCollector::default();
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let mut collector = ztop_tui::UnavailableCollector;
+            // Load the saved setup; `--no-color` overrides the theme once,
+            // without saving that override.
+            let mut config = ztop_tui::Config::load();
+            if cli.no_color {
+                config.theme = ztop_tui::Theme::Mono;
+            }
+            if cli.tree {
+                config.start_in_tree = true;
+            }
+            let flags = flags_from(&cli, cli.readonly)?;
+            ztop_tui::run(&mut collector, &cli.pids, config, flags)?;
+        }
+        Some(Command::Capture { out }) => {
+            let count = ztop_core::capture::capture_to(&out)?;
+            println!("wrote {count} entries to {}", out.display());
+        }
+        Some(Command::Agent {
+            port,
+            bind,
+            pair,
+            allow_control,
+            no_advertise,
+            tls,
+        }) => {
+            let bind: std::net::IpAddr = match bind.parse() {
+                Ok(addr) => addr,
+                Err(_) => {
+                    eprintln!("ztop-agent: --bind must be an IP address");
+                    std::process::exit(2);
+                }
+            };
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(ztop_agent::serve(
+                bind,
+                port,
+                pair,
+                tls,
+                allow_control,
+                !no_advertise,
+            ))?;
+        }
+        Some(Command::Hub {
+            port,
+            ref agents,
+            ref db,
+            ref bind,
+            pair,
+            tls,
+        }) => {
+            // The agent list and the history default under the state
+            // directory; a hub needs a real home, so a missing state
+            // dir is an error, not a silent memory-only hub.
+            let home = ztop_core::paths::state_dir()
+                .map(|dir| dir.join("hub"))
+                .ok_or_else(|| {
+                    std::io::Error::other("no home directory: pass --agents and --db")
+                })?;
+            let agents_path = agents.clone().unwrap_or_else(|| home.join("agents.json"));
+            let db_path = db.clone().unwrap_or_else(|| home.join("history.db"));
+            let bind: std::net::IpAddr = bind.parse().map_err(|error| {
+                std::io::Error::other(format!("{bind} is not an address: {error}"))
+            })?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(ztop_hub::serve(
+                bind,
+                port,
+                &agents_path,
+                &db_path,
+                pair,
+                tls,
+            ))?;
+        }
+        Some(Command::Connect {
+            ref target,
+            tls,
+            ref pin,
+            ref code,
+            once,
+        }) => {
+            // A remote view is observation-only for now: signals and
+            // renice through the protocol come with the pairing work
+            // (decision 0003), and until then acting on a row would
+            // hit the local process table under the same pid.
+            let mut config = ztop_tui::Config::load();
+            if cli.no_color {
+                config.theme = ztop_tui::Theme::Mono;
+            }
+            if cli.tree {
+                config.start_in_tree = true;
+            }
+            let flags = flags_from(&cli, true)?;
+            let collector = if tls {
+                // The trust flow (decision 0041): pair with `--code`,
+                // otherwise reuse the saved token; a pin is always
+                // needed, given or saved.
+                let dir = ztop_core::paths::state_dir()
+                    .ok_or("connect: no home directory, so nowhere to save the host's trust")?;
+                let given_pin = pin.clone();
+                let saved = ztop_core::client::load_host_token(&dir, target);
+                let (pin_value, token) = match (&given_pin, code) {
+                    (Some(pin), Some(code)) => {
+                        let token = ztop_core::client::pair_with(target, pin, code)?;
+                        ztop_core::client::save_host_token(&dir, target, pin, &token)?;
+                        (pin.clone(), Some(token))
+                    }
+                    (Some(pin), None) => (pin.clone(), saved.map(|(_, token)| token)),
+                    (None, Some(_)) => {
+                        return Err(
+                            "connect: --code needs --pin: the agent prints it at startup".into(),
+                        );
+                    }
+                    (None, None) => {
+                        let (pin, token) = saved.ok_or(
+                            "connect: no saved trust for this host: connect once with --tls --pin ... --code ...",
+                        )?;
+                        (pin, Some(token))
+                    }
+                };
+                ztop_core::client::RemoteCollector::tls(target.clone(), &pin_value, token)?
+            } else {
+                ztop_core::client::RemoteCollector::new(target.clone())
+            };
+            if once {
+                return connect_once(collector, target);
+            }
+            let mut collector = collector;
+            ztop_tui::run(&mut collector, &cli.pids, config, flags)?;
+        }
+        Some(Command::Replay { dir }) => {
+            // One rendered frame through the production draw path: the same
+            // journey a live sample would take, without needing a terminal.
+            let sample = ztop_core::sample_from_fixture(&dir)?;
+            let ui = ztop_tui::Ui {
+                sample: Some(sample),
+                ..ztop_tui::Ui::new()
+            };
+            for line in ztop_tui::draw_lines(&ui, 80, 24) {
+                println!("{line}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn no_subcommand_is_the_tui() {
+        let cli = Cli::try_parse_from(["ztop"]).expect("parses");
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn capture_takes_an_out_dir() {
+        let cli =
+            Cli::try_parse_from(["ztop", "capture", "--out", "/tmp/fixture"]).expect("parses");
+        assert!(matches!(cli.command, Some(Command::Capture { .. })));
+    }
+
+    #[test]
+    fn agent_and_hub_take_a_port() {
+        let cli = Cli::try_parse_from(["ztop", "agent", "--port", "8000"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Agent {
+                port: 8000,
+                bind: _,
+                pair: false,
+                allow_control: false,
+                no_advertise: false,
+                tls: false
+            })
+        ));
+        let cli = Cli::try_parse_from(["ztop", "agent", "--pair"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Agent { pair: true, .. })
+        ));
+        let cli = Cli::try_parse_from(["ztop", "agent", "--tls"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Agent { tls: true, .. })
+        ));
+        let cli = Cli::try_parse_from(["ztop", "hub"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Hub {
+                port: 7101,
+                agents: None,
+                db: None,
+                bind: _,
+                pair: false,
+                tls: false
+            })
+        ));
+    }
+
+    #[test]
+    fn connect_takes_a_target() {
+        let cli = Cli::try_parse_from(["ztop", "connect", "host-b:7100"]).expect("parses");
+        assert!(matches!(cli.command, Some(Command::Connect { .. })));
+    }
+
+    #[test]
+    fn connect_once_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "ztop",
+            "connect",
+            "--tls",
+            "--pin",
+            "SHA256:00",
+            "--code",
+            "ABCDEF",
+            "--once",
+            "127.0.0.1:7100",
+        ])
+        .expect("parses");
+        let Some(Command::Connect { once, .. }) = cli.command else {
+            panic!("expected the connect subcommand");
+        };
+        assert!(once);
+    }
+
+    #[test]
+    fn replay_takes_a_fixture_dir() {
+        let cli = Cli::try_parse_from(["ztop", "replay", "/tmp/fixture"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Replay { dir }) if dir == Path::new("/tmp/fixture")
+        ));
+    }
+
+    #[test]
+    fn no_color_flag_parses() {
+        let cli = Cli::try_parse_from(["ztop", "--no-color"]).expect("parses");
+        assert!(cli.no_color);
+        let cli = Cli::try_parse_from(["ztop"]).expect("parses");
+        assert!(!cli.no_color);
+    }
+
+    #[test]
+    fn pids_parse_comma_separated() {
+        let cli = Cli::try_parse_from(["ztop", "-p", "7,42"]).expect("parses");
+        assert!(cli.pids == vec![7, 42]);
+
+        // Repeated flags accumulate; no `-p` means no filter.
+        let cli = Cli::try_parse_from(["ztop", "-p", "7", "--pids", "42"]).expect("parses");
+        assert!(cli.pids == vec![7, 42]);
+        let cli = Cli::try_parse_from(["ztop"]).expect("parses");
+        assert!(cli.pids.is_empty());
+    }
+}

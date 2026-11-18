@@ -1,0 +1,240 @@
+.\" SPDX-License-Identifier: MIT OR Apache-2.0
+.TH ZTOP 1 "2026-11-15" "ztop 0.1.0" "User Commands"
+.SH NAME
+ztop \- a system monitor for one host and your fleet, in a terminal
+.SH SYNOPSIS
+.B ztop
+.RI [ OPTIONS ]
+.RI [ COMMAND ]
+.SH DESCRIPTION
+.B ztop
+shows processes with CPU, memory and I/O meters in a terminal, and can
+watch a whole fleet of hosts. On Linux and macOS it samples the local
+host; the
+.BR capture ,
+.BR agent ,
+.B hub
+and
+.B connect
+subcommands record raw inputs, serve them over the loopback interface,
+watch a whole fleet through one hub process, and drive the TUI from a
+remote host.
+.SS Options
+.TP
+.BR \-p ", " \-\-pids " " \fIPIDS\fP
+Show only these process ids, comma separated.
+.TP
+.BR \-d ", " \-\-delay " " \fISECONDS\fP
+Seconds between samples; fractional values are allowed, and anything
+below 0.1 is refused so the loop cannot spin.
+.TP
+.BR \-u ", " \-\-user " " \fIUSER\fP
+Show only this user's processes at startup.
+.TP
+.BR \-s ", " \-\-sort " " \fIKEY\fP
+Sort by this key at startup: one of
+.BR pid ", " user ", " cpu ", " mem ", " res ", " virt ", " shr ", "
+.BR pri ", " nice ", " time ", " start ", " core ", " ppid ", " name ", "
+.BR command .
+Unknown keys are refused.
+.TP
+.BR \-t ", " \-\-tree
+Start in tree view.
+.TP
+.B \-\-no\-color
+Render without colors, ignoring the saved theme for this run.
+.TP
+.B \-\-readonly
+Refuse every action that changes the system: signals and renice are
+disabled for this run.
+.TP
+.B \-\-help
+Print help. \fB\-\-version\fP prints the version.
+.SS Keys
+.TP
+.BR q ", " Esc ", " Ctrl\-C
+quit
+.TP
+.B F1
+help; any key closes it
+.TP
+.B Z
+pause/resume updates
+.TP
+.B Ctrl\-L
+redraw the screen
+.TP
+.B F2
+setup (theme, tree view, meter style, the I/O, pressure and sensors lines, the
+header meter layout, table columns; saved)
+.TP
+.B F3
+search (Esc/Enter close, F3 repeats)
+.TP
+.B F4
+filter by name
+.TP
+.B u
+filter by user
+.TP
+.B Tab
+cycle the sort column
+.TP
+.B i
+flip the sort direction
+.TP
+.BR M ", " P ", " T
+sort by memory, cpu, time
+.TP
+.B f
+follow a process
+.TP
+.B F5
+tree view; Enter collapses a node
+.TP
+.BR j ", " k
+move the cursor
+.TP
+.BR Space ", " c ", " U
+tag row, tag children, untag all
+.TP
+.BR F9 ", " K
+send a signal to the tagged rows
+.TP
+.BR F7 ", " F8
+renice \-1 / +1
+.TP
+.BR I ", " A
+set the I/O priority (best\-effort/realtime/idle classes and levels) or
+the CPU affinity (all cores, or one core) of the tagged rows; Linux
+only \- on macOS applying reports that the action is unavailable
+.TP
+.BR H
+cycle thread visibility: show userland threads, then hide kernel
+threads, then back (Linux reports thread rows; kernel threads are shown
+and userland threads hidden by default)
+.TP
+.BR p
+toggle the program path in the name column (the path shows whenever the
+system reports one)
+.TP
+.BR e ", " l
+read the environment or the open files of the tagged rows (else the
+cursor's row) live from the OS into a popup: j/k scroll, Esc or q closes;
+what the OS allows decides the outcome \- a same\-user process works
+unprivileged, another user's process needs privileges, and the OS error
+shows in the status line
+.TP
+.BR s
+trace the tagged rows' (else the cursor's row) syscalls into a popup: one
+line per completed syscall with its name and return value, the tail
+followed as it arrives, j/k scrolls back, Esc or q stops the tracer and
+closes; Linux only (ptrace), and only where the OS allows the attach \-
+a child of ztop always works, another user's process needs privileges,
+and macOS reports unavailable
+.TP
+.BR a ", " g ", " d ", " n ", " o ", " t
+silicon, gpus, disks, network, io, thermal
+.PP
+The screens are also tabs: every screen except the process table shows a
+tab strip above its panel with the active screen bracketed, and a click
+on a label switches screens.
+.PP
+The mouse works too: a click selects a row, a click on a column header
+sorts by it, and a click on the function bar replays that key.
+.SH FILES
+.TP
+.I $HOME/Library/Application Support/ztop/config.json
+(macOS) or
+.I $XDG_CONFIG_HOME/ztop/config.json
+(Linux): the saved setup, theme, tree view, line toggles, meter layout
+and column choices.
+.SH EXAMPLES
+.TP
+.B ztop
+Monitor the local host.
+.TP
+.B ztop \-d 0.5 \-s cpu \-u alice
+Refresh twice a second, sorted by CPU, showing one user.
+.TP
+.B ztop \-\-readonly
+Monitor without being able to signal or renice anything.
+.TP
+.B ztop capture \-\-out capture
+Record this host's raw inputs as a fixture for collector tests.
+.TP
+.B ztop agent \-\-port 7100
+Serve the agent protocol on the loopback interface: a versioned
+snapshot, the process list, a ring\-buffer history (an hour at the
+one\-second default) and a live WebSocket stream. Loopback only until
+TLS and pairing arrive.
+.TP
+.B ztop agent \-\-bind 0.0.0.0 \-\-tls
+Bind any address instead of loopback; a bind wider than loopback is
+refused without
+.B \-\-tls
+so no unauthenticated metrics ever leave the machine. With TLS on the
+agent also advertises itself over Bonjour as
+.I _ztop._tcp
+under the name
+.IR "ztop on <hostname>" ,
+which is how the app finds fleet members; pass
+.B \-\-no\-advertise
+to stay silent.
+.TP
+.B ztop agent \-\-tls \-\-pair \-\-allow\-control
+Serve the same protocol over TLS, print a pairing code, and let
+tokens paired from this agent send signals and renice here. Without
+.B \-\-allow\-control
+an agent is read\-only to every client, however it was started;
+control requests also need TLS, so a plain (non\-TLS) agent never
+executes them.
+.TP
+.B ztop connect 127.0.0.1:7100
+Drive the TUI from a remote agent or hub instead of the local host.
+The same keys and screens work, including signals and renice when the
+remote agent allows control and the token carries the right; a
+refusal is reported in the status line like a local failure.
+.TP
+.B ztop connect \-\-tls \-\-pin \fIPIN\fP \-\-code \fICODE\fP 127.0.0.1:7100
+Talk to a TLS agent: the pin is the
+.B SHA256:\fIfingerprint\fP
+the agent printed at startup, and the code is the pairing code it
+printed with
+.BR \-\-pair .
+The first connect pairs and saves the token (and the pin) for that
+host under the user's state directory; later connects reuse it, so
+.B \-\-tls \-\-pin \fIPIN\fP
+(or just
+.B \-\-tls
+) is enough afterwards. A wrong pin fails the handshake rather than
+falling back, and a 401 asks to pair with
+.BR \-\-code .
+Without
+.BR \-\-tls ,
+connect stays plaintext, for loopback or an SSH tunnel.
+.TP
+.B ztop hub \-\-pair
+Serve the fleet hub on loopback port 7101. The hub polls the agents
+listed in \fIhub/agents.json\fP, files every sample in
+\fIhub/history.db\fP, and answers the same protocol an agent answers,
+plus \fI/v1/hosts\fP, the fleet listing with freshness and last errors,
+and a
+.B ?host=\fIname\fP
+selector on snapshot and history so one client reads one machine or
+the whole fleet. Clients pair with the hub exactly as with an agent
+(\fB\-\-pair\fP prints the code); the hub's own tokens gate its reads,
+while its connections to the agents are configured in \fIagents.json\fP.
+A
+.B \-\-bind
+wider than loopback needs
+.BR \-\-tls .
+.TP
+.B ztop connect 127.0.0.1:7101
+The TUI can point at a hub instead of an agent: pick any host with the
+host selector and the screens work the same.
+.SH SEE ALSO
+.BR top (1),
+.BR htop (1),
+.BR kill (1),
+.BR renice (1)

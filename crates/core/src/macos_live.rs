@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! The macOS live collector: the same parse path as the recorded captures.
+//!
+//! The collector assembles the same text the `ztop capture` recorder writes
+//! (the shared producers in [`crate::capture_macos`]) and parses it with
+//! the same parsers the fixture replay uses, so a recorded capture and a
+//! live sample are interpreted identically and the two cannot drift apart
+//! (decision 0010).
+
+use std::collections::HashMap;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use crate::collector::{CollectError, Collector};
+use crate::macos::{core_times, parse_hostinfo, parse_processes, sample_from_parts};
+use crate::macos_io;
+use crate::macos_power::MacOsPower;
+use crate::model::{CpuRates, CpuTimes, Sample};
+
+/// Reads the live macOS host through Mach, libproc and sysctl.
+///
+/// Per-core and per-process rates are deltas between samples: the first
+/// sample reports 0.0 everywhere, later samples the share of the interval
+/// since the previous one, like `htop`. Every source is read without root
+/// (decision 0009); what the kernel denies is `-` in the model, never
+/// faked.
+#[derive(Debug, Default)]
+pub struct MacOsCollector {
+    prev: Option<Prev>,
+    hostname: Option<String>,
+    power: MacOsPower,
+}
+
+/// State from the previous sample needed for rates.
+#[derive(Debug, Clone)]
+struct Prev {
+    at: Instant,
+    cores: Vec<CpuTimes>,
+    /// Cumulative (user, system) CPU nanoseconds per pid.
+    pids: HashMap<u32, (u64, u64)>,
+    /// Cumulative (read, write) bytes per disk device.
+    disks: HashMap<String, (u64, u64)>,
+    /// Cumulative (received, sent) bytes per interface.
+    net: HashMap<String, (u64, u64)>,
+}
+
+impl Collector for MacOsCollector {
+    fn sample(&mut self) -> Result<Sample, CollectError> {
+        let now = Instant::now();
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| CollectError::Unavailable {
+                origin: "clock",
+                what: "the wall clock",
+            })?
+            .as_millis() as u64;
+        let interval_secs = self
+            .prev
+            .as_ref()
+            .map(|prev| now.duration_since(prev.at).as_secs_f64());
+
+        let host_text = crate::capture_macos::hostinfo_text().ok_or(CollectError::Unavailable {
+            origin: "hostinfo",
+            what: "Mach host statistics",
+        })?;
+        let host = parse_hostinfo(&host_text);
+        let procs = parse_processes(&crate::capture_macos::processes_text());
+        let memsize =
+            crate::capture_macos::sysctl_u64("hw.memsize").ok_or(CollectError::Unavailable {
+                origin: "sysctl-hw_memsize",
+                what: "total memory",
+            })?;
+        let hostname = self.hostname();
+        let cores = core_times(&host.cores);
+
+        let (cpu_busy, cpu_states) = match (self.prev.as_ref(), interval_secs) {
+            (Some(prev), Some(secs)) => (
+                crate::model::core_percents(&cores, &prev.cores, secs),
+                crate::model::core_state_percents(&cores, &prev.cores, secs),
+            ),
+            _ => (
+                vec![0.0; cores.len()],
+                vec![crate::model::CpuTimes::default(); cores.len()],
+            ),
+        };
+
+        // Per-process CPU rates: the delta of cumulative nanoseconds over
+        // the interval, as a share of wall time.
+        let interval_ns = interval_secs.map(|secs| (secs * 1e9) as u64).unwrap_or(0);
+        let mut cpu_by_pid: HashMap<u32, f64> = HashMap::new();
+        let mut current_pids: HashMap<u32, (u64, u64)> = HashMap::new();
+        for proc in &procs {
+            let Some(usage) = proc.task else {
+                continue;
+            };
+            current_pids.insert(proc.pid, (usage.utime_ns, usage.stime_ns));
+            let delta_ns = match self.prev.as_ref().and_then(|prev| prev.pids.get(&proc.pid)) {
+                Some(&(old_user, old_system)) if interval_ns > 0 => {
+                    (usage.utime_ns.saturating_sub(old_user)
+                        + usage.stime_ns.saturating_sub(old_system)) as f64
+                }
+                _ => 0.0,
+            };
+            let percent = if interval_ns > 0 {
+                (delta_ns / interval_ns as f64 * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            cpu_by_pid.insert(proc.pid, percent);
+        }
+
+        let system = match (
+            crate::capture_macos::sysctl_text("kern.ostype"),
+            crate::capture_macos::sysctl_text("kern.osrelease"),
+        ) {
+            (Some(ostype), Some(release)) => format!("{ostype} {release}"),
+            _ => String::new(),
+        };
+        let mut sample = sample_from_parts(
+            host,
+            procs,
+            memsize,
+            &hostname,
+            &system,
+            timestamp_ms,
+            CpuRates {
+                busy_percent: cpu_busy,
+                state_percent: cpu_states,
+            },
+        )
+        .map_err(|source| CollectError::Unavailable {
+            origin: source.origin,
+            what: source.what,
+        })?;
+        // Chip identity and core-type counts come straight from sysctls;
+        // the power collector fills current/average/peak power and the
+        // history window on top.
+        let mut silicon = crate::macos::apple_silicon_topology();
+        self.power
+            .sample(&mut sample.sensors, &mut silicon, timestamp_ms);
+        sample.apple_silicon = silicon;
+        for process in &mut sample.processes {
+            if let Some(cpu) = cpu_by_pid.get(&process.pid) {
+                process.cpu_percent = *cpu;
+            }
+        }
+        // Disk and network: the same counters between two live samples
+        // become rates; the first sample reports no rate, like Linux.
+        let mut disks = macos_io::read_disks();
+        let mut net = macos_io::read_net();
+        let current_disks: HashMap<String, (u64, u64)> = disks
+            .iter()
+            .map(|d| (d.name.clone(), (d.read_bytes, d.write_bytes)))
+            .collect();
+        let current_net: HashMap<String, (u64, u64)> = net
+            .iter()
+            .map(|n| (n.name.clone(), (n.rx_bytes, n.tx_bytes)))
+            .collect();
+        if let Some(prev) = self.prev.as_ref() {
+            if let Some(secs) = interval_secs {
+                for (name, read, write) in macos_io::byte_rates(&prev.disks, &current_disks, secs) {
+                    if let Some(disk) = disks.iter_mut().find(|d| d.name == name) {
+                        disk.read_rate = read;
+                        disk.write_rate = write;
+                    }
+                }
+                for (name, rx, tx) in macos_io::byte_rates(&prev.net, &current_net, secs) {
+                    if let Some(interface) = net.iter_mut().find(|n| n.name == name) {
+                        interface.rx_rate = rx;
+                        interface.tx_rate = tx;
+                    }
+                }
+            }
+        }
+        sample.disks = disks;
+        sample.net = net;
+        self.prev = Some(Prev {
+            at: now,
+            cores,
+            pids: current_pids,
+            disks: current_disks,
+            net: current_net,
+        });
+        Ok(sample)
+    }
+}
+
+impl MacOsCollector {
+    /// The hostname, read once from `kern.hostname` and cached.
+    fn hostname(&mut self) -> String {
+        if let Some(name) = &self.hostname {
+            return name.clone();
+        }
+        let name = crate::capture_macos::sysctl_text("kern.hostname")
+            .unwrap_or_else(|| "unknown".to_string());
+        self.hostname = Some(name.clone());
+        name
+    }
+}

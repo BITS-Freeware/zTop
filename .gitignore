@@ -1,0 +1,10 @@
+# Build output
+/target
+
+# Default output directory of `ztop capture`
+/capture
+
+# .deb packages built by packaging/build-deb.sh
+/*.deb
+
+.DS_Store
