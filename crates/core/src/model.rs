@@ -408,6 +408,13 @@ pub struct Cpu {
     pub state_percent: Vec<CpuTimes>,
     /// Current frequency per core, when the platform reports it.
     pub frequency_mhz: Vec<Metric>,
+    /// Core numbers that are offline in this sample (Linux lists only
+    /// online CPUs in `/proc/stat`). Their entries in `cores`,
+    /// `busy_percent` and `state_percent` are zeros that mean
+    /// "unavailable", not idle. Empty, and absent from the JSON, when
+    /// every core is online.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offline: Vec<usize>,
 }
 
 /// Memory and swap in bytes.
@@ -643,6 +650,7 @@ mod tests {
                 frequency_mhz: vec![Metric::unavailable(Unit::Hertz)],
                 busy_percent: vec![0.0],
                 state_percent: vec![CpuTimes::default()],
+                offline: Vec::new(),
             },
             memory: Memory {
                 total: Metric::available(16.0 * 1024.0 * 1024.0 * 1024.0, Unit::Bytes),

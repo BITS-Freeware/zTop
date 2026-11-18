@@ -499,6 +499,7 @@ pub(crate) fn sample_from_parts(
             },
             cores,
             frequency_mhz: Vec::new(),
+            offline: Vec::new(),
         },
         memory: Memory {
             total: Metric::available(total_mem, Unit::Bytes),

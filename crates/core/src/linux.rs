@@ -43,21 +43,32 @@ use crate::model::{Battery, BatteryState, Fan, TempSensor};
 /// Jiffies per second: the fixed `USER_HZ` of the kernel/user ABI.
 const USER_HZ: f64 = 100.0;
 
-/// Parsed `/proc/stat`: one [`CpuTimes`] per core, ordered by core number,
+/// Parsed `/proc/stat`: one [`CpuTimes`] per core, indexed by core number,
 /// plus the boot time (`btime`) when the line is present.
 #[derive(Debug, Clone, Default)]
 pub struct ProcStat {
     pub(crate) cores: Vec<CpuTimes>,
+    /// Core numbers below the highest listed one that `/proc/stat` did
+    /// not list: offline CPUs. Their `cores` entries are zeros.
+    pub(crate) offline: Vec<usize>,
     /// Boot time in Unix seconds; `None` when the `btime` line is
     /// missing, which turns every start time unavailable.
     pub(crate) btime: Option<u64>,
 }
 
+/// The highest core number `/proc/stat` may name: a line past it is a
+/// corrupt source, not a machine.
+const MAX_CORE_NUMBER: usize = 1 << 16;
+
 /// Parses `/proc/stat` into per-core CPU times.
 ///
-/// Returns `None` when the text has no core lines, when a core line does
-/// not parse, or when core numbers have gaps or duplicates: a collector
-/// must not silently drop part of a source. The aggregate `cpu` line and
+/// The kernel lists only online CPUs, so core numbers can have gaps
+/// (SMT turned off at runtime, a hot-unplugged vCPU). Cores keep their
+/// numbers: a missing core below the highest listed one is reported in
+/// `offline` with zeroed times. Returns `None` when the text has no core
+/// lines, when a core line does not parse, or when a core number repeats
+/// or is absurdly large: a collector must not silently drop part of a
+/// source. The aggregate `cpu` line and
 /// every non-CPU line are ignored; the aggregate's kernel-side accounting
 /// does not reliably equal the sum of the cores, so the collector only
 /// reports per-core times.
@@ -87,17 +98,55 @@ pub fn parse_proc_stat(text: &str) -> Option<ProcStat> {
         return None;
     }
     cores.sort_by_key(|(index, _)| *index);
-    if cores
-        .iter()
-        .enumerate()
-        .any(|(want, (got, _))| want != *got)
-    {
+    if cores.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return None;
     }
+    let highest = cores.last().map(|(index, _)| *index)?;
+    if highest > MAX_CORE_NUMBER {
+        return None;
+    }
+    let mut by_number = vec![None; highest + 1];
+    for (index, times) in cores {
+        by_number[index] = Some(times);
+    }
+    let offline = by_number
+        .iter()
+        .enumerate()
+        .filter(|(_, times)| times.is_none())
+        .map(|(index, _)| index)
+        .collect();
     Some(ProcStat {
-        cores: cores.into_iter().map(|(_, times)| times).collect(),
+        cores: by_number
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect(),
+        offline,
         btime,
     })
+}
+
+/// Per-core busy and per-state shares for the live sampler, with a core
+/// that is offline now or was offline in the previous sample reporting
+/// zeros: counters accumulated since boot are not an interval.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn live_core_percents(
+    current: &[CpuTimes],
+    current_offline: &[usize],
+    previous: &[CpuTimes],
+    previous_offline: &[usize],
+    interval_secs: f64,
+) -> (Vec<f64>, Vec<CpuTimes>) {
+    let mut busy = core_percents(current, previous, interval_secs);
+    let mut states = crate::model::core_state_percents(current, previous, interval_secs);
+    for index in current_offline.iter().chain(previous_offline) {
+        if let Some(value) = busy.get_mut(*index) {
+            *value = 0.0;
+        }
+        if let Some(value) = states.get_mut(*index) {
+            *value = CpuTimes::default();
+        }
+    }
+    (busy, states)
 }
 
 /// Parses the nine tick fields of one `cpuN` line, converting to seconds.
@@ -278,19 +327,93 @@ fn system_text(osrelease: &str) -> String {
     }
 }
 
-/// Parses `/proc/mounts` into a map of device name → mount point.
+/// Parses `/proc/mounts` into a map of kernel device name (the name
+/// `/proc/diskstats` uses, such as `vda` or `sda1`) → mount point.
 ///
-/// Lines that do not follow the field layout are skipped.
+/// Only `/dev/...` sources name block devices; the key is the path's
+/// last component (`/dev/vda` → `vda`). The first mount of a device
+/// wins, so `/` beats a later bind mount of the same device. The kernel
+/// escapes spaces and other separators in mount points as octal
+/// (`\040`); they are decoded. Lines that do not follow the field
+/// layout are skipped. The live collector resolves links and aliases
+/// first ([`parse_proc_mounts_with`]).
 pub fn parse_proc_mounts(text: &str) -> std::collections::HashMap<String, String> {
+    parse_proc_mounts_with(text, |source, _| {
+        source
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// [`parse_proc_mounts`] with the device naming supplied: `resolve`
+/// gets each `/dev/...` source and its (decoded) mount point and
+/// returns the kernel device name, or `None` to skip the line.
+pub fn parse_proc_mounts_with(
+    text: &str,
+    resolve: impl Fn(&str, &str) -> Option<String>,
+) -> std::collections::HashMap<String, String> {
     let mut mounts = std::collections::HashMap::new();
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 2 {
+        if fields.len() < 2 || !fields[0].starts_with("/dev/") {
             continue;
         }
-        mounts.insert(fields[0].to_string(), fields[1].to_string());
+        let source = unescape_mount_field(fields[0]);
+        let mount = unescape_mount_field(fields[1]);
+        if let Some(name) = resolve(&source, &mount) {
+            mounts.entry(name).or_insert(mount);
+        }
     }
     mounts
+}
+
+/// Decode the kernel's octal escapes in a `/proc/mounts` field: `\040`
+/// space, `\011` tab, `\012` newline, `\134` backslash. Anything else
+/// stays as written.
+fn unescape_mount_field(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && bytes[i + 1..i + 4]
+                .iter()
+                .all(|b| (b'0'..=b'7').contains(b))
+        {
+            let value = (bytes[i + 1] - b'0') as u32 * 64
+                + (bytes[i + 2] - b'0') as u32 * 8
+                + (bytes[i + 3] - b'0') as u32;
+            if let Ok(byte) = u8::try_from(value) {
+                out.push(byte);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The kernel name of the block device behind a `/dev/...` mount
+/// source, on the live host: links (`/dev/mapper/*`, `/dev/disk/by-*`)
+/// resolve to their target (`dm-0`, `sda1`), and an alias with no node
+/// (`/dev/root`) resolves through the mount point's device number in
+/// `/sys/dev/block`.
+#[cfg(target_os = "linux")]
+fn live_device_name(source: &str, mount: &str) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let name_of = |path: &Path| path.file_name()?.to_str().map(str::to_string);
+    if let Ok(path) = std::fs::canonicalize(source) {
+        return name_of(&path);
+    }
+    let dev = std::fs::metadata(mount).ok()?.dev();
+    let (major, minor) = (libc::major(dev), libc::minor(dev));
+    let link = std::fs::read_link(format!("/sys/dev/block/{major}:{minor}")).ok()?;
+    name_of(&link)
 }
 
 /// Capacity of one mounted filesystem via `statvfs`.
@@ -1187,6 +1310,7 @@ pub fn sample_from_fixture(dir: &Path) -> Result<Sample, FixtureSampleError> {
             frequency_mhz: cpuinfo
                 .map(|text| parse_cpuinfo_frequencies(&text))
                 .unwrap_or_default(),
+            offline: stat.offline,
         },
         memory: memory_from(meminfo),
         load_avg: loadavg,
@@ -1243,15 +1367,15 @@ mod live {
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        CpuTimes, PidData, PidIo, PidStat, USER_HZ, core_percents, counter_rate, detect_container,
-        disk_usage, io_rates, memory_from, parse_cpuinfo_frequencies, parse_hwmon, parse_pid_io,
-        parse_pid_stat, parse_pid_statm, parse_pid_status, parse_power_supply, parse_pressure,
-        parse_proc_diskstats, parse_proc_loadavg, parse_proc_loadavg_entities, parse_proc_meminfo,
-        parse_proc_mounts, parse_proc_net_dev, parse_proc_stat, parse_proc_uptime, process_row,
-        system_text,
+        CpuTimes, PidData, PidIo, PidStat, USER_HZ, counter_rate, detect_container, disk_usage,
+        io_rates, live_core_percents, live_device_name, memory_from, parse_cpuinfo_frequencies,
+        parse_hwmon, parse_pid_cmdline, parse_pid_io, parse_pid_stat, parse_pid_statm,
+        parse_pid_status, parse_power_supply, parse_pressure, parse_proc_diskstats,
+        parse_proc_loadavg, parse_proc_loadavg_entities, parse_proc_meminfo,
+        parse_proc_mounts_with, parse_proc_net_dev, parse_proc_stat, parse_proc_uptime,
+        process_row, system_text,
     };
     use crate::collector::{CollectError, Collector};
-    use crate::model::core_state_percents;
     use crate::model::{
         AppleSilicon, Cpu, Fan, Metric, Pressure, Process, Sample, Sensors, TempSensor, Unit,
     };
@@ -1273,6 +1397,8 @@ mod live {
         pids: HashMap<u32, PidStat>,
         ios: HashMap<u32, PidIo>,
         cores: Vec<CpuTimes>,
+        /// Core numbers offline in the previous sample.
+        offline: Vec<usize>,
         /// Per-device byte counters keyed by device name.
         disks: HashMap<String, (u64, u64)>,
         /// Per-interface byte counters keyed by interface name.
@@ -1303,10 +1429,9 @@ mod live {
                 what: "CPU times",
             })?;
             let (per_core_percent, per_core_states) = match (self.prev.as_ref(), interval_secs) {
-                (Some(prev), Some(secs)) => (
-                    core_percents(&stat.cores, &prev.cores, secs),
-                    core_state_percents(&stat.cores, &prev.cores, secs),
-                ),
+                (Some(prev), Some(secs)) => {
+                    live_core_percents(&stat.cores, &stat.offline, &prev.cores, &prev.offline, secs)
+                }
                 _ => (
                     vec![0.0; stat.cores.len()],
                     vec![CpuTimes::default(); stat.cores.len()],
@@ -1331,7 +1456,10 @@ mod live {
                 .ok()
                 .map(|disk_text| {
                     let mounts_text = fs::read_to_string("/proc/mounts").unwrap_or_default();
-                    parse_proc_diskstats(&disk_text, &parse_proc_mounts(&mounts_text))
+                    parse_proc_diskstats(
+                        &disk_text,
+                        &parse_proc_mounts_with(&mounts_text, live_device_name),
+                    )
                 })
                 .unwrap_or_default();
             let mut net = fs::read_to_string("/proc/net/dev")
@@ -1366,6 +1494,12 @@ mod live {
                     .ok()
                     .map(|text| parse_pid_status(&text));
                 data.comm = fs::read_to_string(base.join("comm")).ok();
+                // The full command line; argv may hold any bytes, so a
+                // non-UTF-8 argument reads lossily instead of losing the
+                // whole line.
+                data.command = fs::read(base.join("cmdline"))
+                    .ok()
+                    .and_then(|bytes| parse_pid_cmdline(&String::from_utf8_lossy(&bytes)));
                 data.io = fs::read_to_string(base.join("io"))
                     .ok()
                     .and_then(|text| parse_pid_io(&text));
@@ -1496,6 +1630,7 @@ mod live {
                     .filter_map(|(pid, data)| data.io.map(|io| (*pid, io)))
                     .collect(),
                 cores: stat.cores.clone(),
+                offline: stat.offline.clone(),
                 disks: disks
                     .iter()
                     .map(|disk| (disk.name.clone(), (disk.read_bytes, disk.write_bytes)))
@@ -1519,6 +1654,7 @@ mod live {
                     frequency_mhz: parse_cpuinfo_frequencies(
                         &fs::read_to_string("/proc/cpuinfo").unwrap_or_default(),
                     ),
+                    offline: stat.offline,
                 },
                 memory: memory_from(meminfo),
                 load_avg,
@@ -1621,13 +1757,89 @@ mod tests {
         assert_eq!(stat.cores[1].user, 0.01);
     }
 
+    /// Regression: `/proc/stat` lists only online CPUs, so turning SMT
+    /// off or unplugging a vCPU leaves gaps in the core numbers, and
+    /// rejecting gaps failed every live sample (the agent answered 503
+    /// forever). Cores keep their numbers; the missing ones are listed
+    /// as offline with zeroed times.
     #[test]
-    fn proc_stat_rejects_gaps_and_bad_lines() {
-        assert!(parse_proc_stat("cpu0 1 0 1 4 0 0 0 0 0\ncpu2 1 0 1 4 0 0 0 0 0\n").is_none());
+    fn proc_stat_keeps_core_numbers_across_offline_cores() {
+        let stat = parse_proc_stat(
+            "cpu  3 0 2 9 0 0 0 0 0\ncpu0 1 0 1 4 0 0 0 0 0\ncpu2 2 0 1 5 0 0 0 0 0\ncpu5 3 0 0 1 0 0 0 0 0\n",
+        )
+        .expect("a stat with offline cores parses");
+        assert_eq!(stat.cores.len(), 6);
+        assert_eq!(stat.offline, vec![1, 3, 4]);
+        assert_eq!(stat.cores[0].user, 0.01);
+        assert_eq!(stat.cores[2].user, 0.02);
+        assert_eq!(stat.cores[5].user, 0.03);
+        assert_eq!(stat.cores[1], CpuTimes::default());
+        // Every core online: nothing listed.
+        let all =
+            parse_proc_stat("cpu0 1 0 1 4 0 0 0 0 0\ncpu1 1 0 1 4 0 0 0 0 0\n").expect("parses");
+        assert!(all.offline.is_empty());
+    }
+
+    /// A core that was offline in either sample reports no busy share:
+    /// counters since boot are not an interval.
+    #[test]
+    fn offline_cores_report_no_busy_share() {
+        let online = CpuTimes {
+            user: 5.0,
+            idle: 5.0,
+            ..CpuTimes::default()
+        };
+        let later = CpuTimes {
+            user: 10.0,
+            idle: 10.0,
+            ..CpuTimes::default()
+        };
+        // Core 1 comes online between samples; core 2 goes offline.
+        let previous = vec![online, CpuTimes::default(), online];
+        let current = vec![later, later, CpuTimes::default()];
+        let (busy, states) = live_core_percents(&current, &[2], &previous, &[1], 1.0);
+        assert_eq!(busy.len(), 3);
+        assert!(busy[0] > 0.0);
+        assert_eq!(busy[1], 0.0);
+        assert_eq!(busy[2], 0.0);
+        assert_eq!(states[1], CpuTimes::default());
+        assert_eq!(states[2], CpuTimes::default());
+    }
+
+    #[test]
+    fn proc_stat_rejects_duplicates_and_bad_lines() {
+        assert!(parse_proc_stat("cpu0 1 0 1 4 0 0 0 0 0\ncpu0 1 0 1 4 0 0 0 0 0\n").is_none());
         assert!(parse_proc_stat("cpu0 1 0 1\n").is_none());
         assert!(parse_proc_stat("cpuX 1 0 1 4 0 0 0 0 0\n").is_none());
         assert!(parse_proc_stat("intr 123\n").is_none());
         assert!(parse_proc_stat("").is_none());
+    }
+
+    /// Regression: mounts were keyed by the `/proc/mounts` source
+    /// (`/dev/vda`) and looked up by the `/proc/diskstats` name (`vda`).
+    /// Keys are now the kernel's device name; the first mount of a
+    /// device wins (`/` over a later bind of the same device), and the
+    /// octal escapes the kernel writes for spaces are decoded.
+    #[test]
+    fn mounts_key_by_the_name_diskstats_uses() {
+        let mounts = parse_proc_mounts(
+            "/dev/vda / ext4 rw 0 0\n\
+             proc /proc proc rw 0 0\n\
+             /dev/vda /var/lib/bind ext4 rw 0 0\n\
+             /dev/sdb1 /mnt/with\\040space ext4 rw 0 0\n",
+        );
+        assert_eq!(mounts.get("vda").map(String::as_str), Some("/"));
+        assert_eq!(
+            mounts.get("sdb1").map(String::as_str),
+            Some("/mnt/with space")
+        );
+        assert!(!mounts.contains_key("proc"));
+        let disks = parse_proc_diskstats(
+            "254 0 vda 1 0 8 0 2 0 16 0 0 0 0\n8 17 sdb1 1 0 8 0 2 0 16 0 0 0 0\n",
+            &mounts,
+        );
+        assert_eq!(disks[0].mount, "/");
+        assert_eq!(disks[1].mount, "/mnt/with space");
     }
 
     #[test]

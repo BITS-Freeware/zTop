@@ -63,6 +63,10 @@ pub struct AgentState {
     /// and the Linux-only tweaks). Off by default: watching is safe,
     /// acting is a decision (decision 0042).
     pub allow_control: bool,
+    /// The sampler's most recent failure, while it keeps failing: a
+    /// host where every sample fails answers 503 forever, and this is
+    /// the reason, logged once per change instead of never.
+    sample_error: Mutex<Option<String>>,
 }
 
 impl Default for AgentState {
@@ -78,6 +82,7 @@ impl Default for AgentState {
             auth: Mutex::new(auth::Auth::in_memory()),
             enforce_auth: false,
             allow_control: false,
+            sample_error: Mutex::new(None),
         }
     }
 }
@@ -300,6 +305,7 @@ pub async fn serve(
         // on (decision 0003).
         enforce_auth: tls,
         allow_control,
+        sample_error: Mutex::new(None),
     });
     spawn_sampler(state.clone(), DEFAULT_INTERVAL);
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
@@ -604,14 +610,33 @@ async fn tokens_revoke(
 
 /// One sampler tick: take a sample, file it in the ring and hand it to
 /// every live-stream client. A failing sample is skipped, not fatal:
-/// the next tick retries and a rate-dependent metric heals itself.
+/// the next tick retries and a rate-dependent metric heals itself. A
+/// failure is logged when it starts or changes, and the recovery when
+/// sampling works again, so a host that never samples says why without
+/// a line per second.
 fn tick<C: ztop_core::collector::Collector>(collector: &mut C, state: &AgentState) {
     match collector.sample() {
         Ok(sample) => {
+            if state
+                .sample_error
+                .lock()
+                .expect("sample error")
+                .take()
+                .is_some()
+            {
+                eprintln!("ztop-agent: sampling works again");
+            }
             state.push(sample.clone());
             let _ = state.sender.send(sample);
         }
-        Err(_error) => {}
+        Err(error) => {
+            let message = error.to_string();
+            let mut last = state.sample_error.lock().expect("sample error");
+            if last.as_deref() != Some(message.as_str()) {
+                eprintln!("ztop-agent: sampling failed: {message}");
+                *last = Some(message);
+            }
+        }
     }
 }
 
@@ -747,6 +772,7 @@ mod tests {
                 busy_percent: vec![0.0],
                 state_percent: vec![CpuTimes::default()],
                 frequency_mhz: Vec::new(),
+                offline: Vec::new(),
             },
             memory: Memory {
                 total: Metric::unavailable(Unit::Bytes),
@@ -1133,6 +1159,47 @@ mod tests {
         let ring = state.history.lock().expect("lock");
         assert_eq!(ring.len(), 2);
         assert!(ring.iter().all(|s| s.processes.is_empty()));
+    }
+
+    /// A collector whose samples fail until told otherwise.
+    struct Flaky {
+        fail: bool,
+    }
+
+    impl ztop_core::collector::Collector for Flaky {
+        fn sample(&mut self) -> Result<Sample, ztop_core::collector::CollectError> {
+            if self.fail {
+                Err(ztop_core::collector::CollectError::Unavailable {
+                    origin: "/proc/stat",
+                    what: "CPU times",
+                })
+            } else {
+                Ok(a_sample())
+            }
+        }
+    }
+
+    /// Regression: `tick` dropped sampler errors without a word, so a
+    /// host where every sample failed served 503 with no clue why. The
+    /// failure is kept (and logged once) until a sample works again.
+    #[test]
+    fn a_failing_sampler_records_why_until_it_recovers() {
+        let state = AgentState::default();
+        let mut collector = Flaky { fail: true };
+        tick(&mut collector, &state);
+        tick(&mut collector, &state);
+        let recorded = state.sample_error.lock().expect("lock").clone();
+        assert!(
+            recorded
+                .as_deref()
+                .is_some_and(|error| error.contains("/proc/stat")),
+            "{recorded:?}"
+        );
+        assert_eq!(state.latest(), None);
+        collector.fail = false;
+        tick(&mut collector, &state);
+        assert!(state.sample_error.lock().expect("lock").is_none());
+        assert!(state.latest().is_some());
     }
 
     #[tokio::test]
