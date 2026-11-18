@@ -401,23 +401,7 @@ struct PairBody {
 /// The response is the agent's shape; the token only opens the hub.
 async fn pair(State(state): State<Arc<HubState>>, Json(body): Json<PairBody>) -> Response {
     let mut auth = state.auth.lock().expect("auth");
-    match auth.pair(&body.code, auth::now_ms()) {
-        Ok(token) => Json(json!({
-            "protocol": ztop_core::client::PROTOCOL_VERSION,
-            "token": token,
-        }))
-        .into_response(),
-        Err(auth::AuthError::BadCode) => (
-            axum::http::StatusCode::FORBIDDEN,
-            "the pairing code does not match, is used up or expired",
-        )
-            .into_response(),
-        Err(error) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("pairing failed: {error}"),
-        )
-            .into_response(),
-    }
+    ztop_agent::pair_response(&mut auth, &body.code, "ztop-hub")
 }
 
 /// `GET /v1/hosts`: what the hub watches, unreachable hosts last.
@@ -536,8 +520,15 @@ async fn history(State(state): State<Arc<HubState>>, query: Query<HostQuery>) ->
 }
 
 /// `GET /v1/tokens`: the hub's accepted clients, oldest first.
-async fn tokens_list(State(state): State<Arc<HubState>>) -> Response {
-    let tokens = state.auth.lock().expect("auth").list();
+async fn tokens_list(
+    State(state): State<Arc<HubState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let auth = state.auth.lock().expect("auth");
+    if let Some(refusal) = ztop_agent::refuse_unless_manager(&auth, &headers) {
+        return refusal;
+    }
+    let tokens = auth.list();
     Json(json!({
         "protocol": ztop_core::client::PROTOCOL_VERSION,
         "tokens": tokens,
@@ -548,9 +539,14 @@ async fn tokens_list(State(state): State<Arc<HubState>>) -> Response {
 /// `DELETE /v1/tokens/{id}`: revoke a hub token.
 async fn tokens_revoke(
     State(state): State<Arc<HubState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    let revoked = state.auth.lock().expect("auth").revoke(&id);
+    let mut auth = state.auth.lock().expect("auth");
+    if let Some(refusal) = ztop_agent::refuse_unless_manager(&auth, &headers) {
+        return refusal;
+    }
+    let revoked = auth.revoke(&id);
     if revoked {
         Json(json!({
             "protocol": ztop_core::client::PROTOCOL_VERSION,
@@ -588,6 +584,7 @@ pub async fn serve(
     agents_path: &Path,
     db_path: &Path,
     pair: bool,
+    allow_manage: bool,
     tls: bool,
 ) -> std::io::Result<()> {
     bind_rules(bind, tls).map_err(std::io::Error::other)?;
@@ -600,13 +597,22 @@ pub async fn serve(
         None => auth::Auth::in_memory(),
     };
     if pair {
-        let rights = vec!["read".to_string()];
+        let mut rights = vec!["read".to_string()];
+        if allow_manage {
+            rights.push(auth::RIGHT_MANAGE.to_string());
+        }
         match auth.start_pairing(
             "pairing from the command line".into(),
             auth::now_ms(),
             rights,
         ) {
-            Ok(code) => println!("Pairing code: {code} (valid for 5 minutes)"),
+            Ok(code) => ztop_agent::notice::announce_pairing_code(
+                &code,
+                "ztop-hub",
+                ztop_core::paths::state_dir()
+                    .map(|dir| dir.join("hub"))
+                    .as_deref(),
+            ),
             Err(error) => eprintln!("ztop-hub: pairing is unavailable: {error}"),
         }
     }
@@ -957,6 +963,88 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Regression: the hub copied the agent's token routes behind the
+    /// read check, so a read-only token (or anyone on an unenforced
+    /// loopback hub) could list and revoke every token. Only a token
+    /// with the `manage` right may.
+    #[tokio::test]
+    async fn only_a_manage_token_lists_or_revokes_hub_tokens() {
+        for enforced in [true, false] {
+            let state = hub_with(two_agents(), enforced).await;
+            let mut tokens = Vec::new();
+            for rights in [
+                vec!["read".to_string()],
+                vec!["read".to_string(), "manage".to_string()],
+            ] {
+                let mut auth = state.auth.lock().expect("auth");
+                let code = auth
+                    .start_pairing("tests".into(), auth::now_ms(), rights)
+                    .expect("code");
+                tokens.push(auth.pair(&code, auth::now_ms()).expect("token"));
+            }
+            let (reader, manager) = (tokens[0].clone(), tokens[1].clone());
+            let request = |method: &str, uri: &str, token: Option<&str>| {
+                let mut builder = Request::builder().method(method).uri(uri);
+                if let Some(token) = token {
+                    builder = builder.header("authorization", format!("Bearer {token}"));
+                }
+                builder.body(Body::empty()).expect("request")
+            };
+            for token in [None, Some(reader.as_str())] {
+                let response = router(state.clone())
+                    .oneshot(request("GET", "/v1/tokens", token))
+                    .await
+                    .expect("response");
+                assert!(
+                    matches!(
+                        response.status(),
+                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                    ),
+                    "enforced={enforced}: list answered {}",
+                    response.status()
+                );
+            }
+            let response = router(state.clone())
+                .oneshot(request("GET", "/v1/tokens", Some(&manager)))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let value: serde_json::Value =
+                serde_json::from_str(&text(response).await).expect("json");
+            let id = value["tokens"]
+                .as_array()
+                .expect("tokens")
+                .iter()
+                .find(|record| record["rights"].as_array().is_some_and(|r| r.len() == 1))
+                .expect("the reader's record")["id"]
+                .as_str()
+                .expect("id")
+                .to_string();
+            let response = router(state.clone())
+                .oneshot(request(
+                    "DELETE",
+                    &format!("/v1/tokens/{id}"),
+                    Some(&reader),
+                ))
+                .await
+                .expect("response");
+            assert!(matches!(
+                response.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ));
+            let response = router(state.clone())
+                .oneshot(request(
+                    "DELETE",
+                    &format!("/v1/tokens/{id}"),
+                    Some(&manager),
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!state.auth.lock().expect("auth").check(&reader));
+        }
     }
 
     /// End to end: two real agent servers (in-process, synthetic

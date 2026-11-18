@@ -12,8 +12,12 @@ package manager installed the binary.
 
 ## macOS (launchd, per user)
 
-    cp launchd/com.ztop.agent.plist ~/Library/LaunchAgents/
+    sed "s|/Users/YOU|$HOME|g" launchd/com.ztop.agent.plist \
+        > ~/Library/LaunchAgents/com.ztop.agent.plist
     launchctl load ~/Library/LaunchAgents/com.ztop.agent.plist
+
+The `sed` fills in your home directory: launchd needs absolute log
+paths, and the log belongs in `~/Library/Logs`.
 
 Stop: `launchctl unload ~/Library/LaunchAgents/com.ztop.agent.plist`.
 
@@ -28,5 +32,19 @@ Stop: `systemctl --user stop ztop-agent`.
 
 The agent binds 127.0.0.1 only; TLS + pairing is what lets a client on
 another machine talk to it. First start prints the pairing code and the
-TLS fingerprint to the service's log (`/tmp/ztop-agent.*` under
-launchd, `journalctl --user -u ztop-agent` under systemd).
+TLS fingerprint to the service's log (`~/Library/Logs/ztop-agent.log`
+under launchd, `$(brew --prefix)/var/log/ztop-agent.log` under
+`brew services`, `journalctl --user -u ztop-agent` under systemd).
+
+The pairing code is a credential for its five minutes, so the agent
+guards it (decision 0061): before printing it into a log file, the
+agent narrows that file to its owner (mode 0600); if another user owns
+the file, the code goes to `pairing-code` (mode 0600) in the agent's
+state directory instead and the log only says where. Five wrong
+guesses burn a code, and guesses are spaced a second apart.
+
+Token management (`GET /v1/tokens`, `DELETE /v1/tokens/{id}`) needs a
+token paired with `--allow-manage`; the shipped services do not pass
+it, so no client paired through them can list or revoke tokens. To
+manage tokens, stop the service and run `ztop agent --tls --pair
+--allow-manage` once by hand to pair your own client.

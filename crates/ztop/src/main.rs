@@ -73,6 +73,10 @@ enum Command {
         /// Let paired tokens send signals and renice here.
         #[arg(long)]
         allow_control: bool,
+        /// Let the token paired with --pair list and revoke tokens.
+        /// Pair your own client with it, not every client.
+        #[arg(long, requires = "pair")]
+        allow_manage: bool,
         /// Skip the Bonjour advertisement that --tls turns on.
         #[arg(long)]
         no_advertise: bool,
@@ -99,6 +103,9 @@ enum Command {
         /// Print a pairing code so a client can pair with the hub.
         #[arg(long)]
         pair: bool,
+        /// Let the token paired with --pair list and revoke tokens.
+        #[arg(long, requires = "pair")]
+        allow_manage: bool,
         /// Serve HTTPS with a self-signed certificate and enforce
         /// tokens.
         #[arg(long)]
@@ -254,6 +261,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             bind,
             pair,
             allow_control,
+            allow_manage,
             no_advertise,
             tls,
         }) => {
@@ -273,6 +281,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 pair,
                 tls,
                 allow_control,
+                allow_manage,
                 !no_advertise,
             ))?;
         }
@@ -282,6 +291,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             ref db,
             ref bind,
             pair,
+            allow_manage,
             tls,
         }) => {
             // The agent list and the history default under the state
@@ -306,6 +316,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 &agents_path,
                 &db_path,
                 pair,
+                allow_manage,
                 tls,
             ))?;
         }
@@ -409,6 +420,7 @@ mod tests {
                 bind: _,
                 pair: false,
                 allow_control: false,
+                allow_manage: false,
                 no_advertise: false,
                 tls: false
             })
@@ -432,6 +444,7 @@ mod tests {
                 db: None,
                 bind: _,
                 pair: false,
+                allow_manage: false,
                 tls: false
             })
         ));
