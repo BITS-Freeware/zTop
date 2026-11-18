@@ -289,7 +289,16 @@ Check an item only when it works and a test or a recorded check shows it. Add th
     Pairing codes and token list/revoke: decision 0038, tests
     `an_enforced_agent_refuses_the_unpaired_and_pairs_the_code`,
     `tokens_can_be_listed_and_revoked_over_the_wire`,
-    `tls_serves_and_a_pinned_client_reads`. A QR code on the pairing
+    `tls_serves_and_a_pinned_client_reads`. Hardened by decision 0061:
+    eight-symbol codes burned by five wrong guesses, guesses spaced a
+    second apart, token list/revoke only for a token with the `manage`
+    right (`--allow-manage`) on agent and hub alike, and a log file is
+    narrowed to its owner before a code is printed into it (tests
+    `wrong_guesses_burn_the_code`, `guesses_right_after_a_wrong_one_wait`,
+    `codes_are_long_and_drawn_from_the_alphabet`,
+    `only_a_manage_token_lists_or_revokes_tokens`,
+    `only_a_manage_token_lists_or_revokes_hub_tokens`,
+    `a_world_readable_log_is_narrowed_before_the_code_is_printed`). A QR code on the pairing
     screen is app-side and tracked by the app.
 - [x] Localhost-only until configured
   - `serve` binds `127.0.0.1` by default and `--bind <IP>` widens it;
@@ -314,9 +323,17 @@ Check an item only when it works and a test or a recorded check shows it. Add th
     granted to codes issued by a control-allowing agent (decision
     0042). Signal 0 is the permission probe: it sends nothing, so the
     UI's plan probe is safe even when the gates would refuse.
+    Every action is checked before any system call (decision 0061):
+    pid 0 and pids above `i32::MAX` (process groups, or every process
+    via `kill(-1)`) are refused, signals must be in the platform's
+    catalog (or 0), renice steps stay within 39, and I/O priorities and
+    affinity masks must be ones the pickers offer.
     Tests: `control_needs_tls_the_allowance_and_the_right`,
     `control_answers_per_pid_when_all_the_gates_pass`,
-    `control_replies_map_back_onto_the_plan`.
+    `control_replies_map_back_onto_the_plan`,
+    `control_refuses_pids_that_name_groups_or_everyone`,
+    `pids_that_name_groups_or_everyone_are_refused`,
+    `actions_outside_the_catalog_are_refused`.
 - [x] `ztop hub` with SQLite history, serving the same protocol
   - `ztop hub` polls every agent in `agents.json` (one
     `spawn_blocking` `RemoteCollector` per agent on the agent's own

@@ -12,6 +12,7 @@
 //! transport decision (0003).
 
 pub mod auth;
+pub mod notice;
 pub mod tls;
 
 use std::collections::VecDeque;
@@ -248,8 +249,9 @@ fn advertise(bind: std::net::IpAddr, port: u16) -> mdns_sd::ServiceDaemon {
 
 /// Serve the agent protocol on `bind:port` until the process is
 /// stopped, sampling the host on [`DEFAULT_INTERVAL`] in the background.
-/// With `pair`, print a pairing code the person can trade for a token.
-/// With `tls`, serve HTTPS with the agent's self-signed certificate and
+/// With `pair`, print a pairing code the person can trade for a token;
+/// the token reads, and also controls with `allow_control` and manages
+/// tokens with `allow_manage`. With `tls`, serve HTTPS with the agent's self-signed certificate and
 /// enforce tokens (decision 0003: TLS is the trust boundary); a bind
 /// wider than loopback requires it (decision 0044). With `advertise`
 /// and TLS, the agent is discoverable over Bonjour as `_ztop._tcp`.
@@ -259,6 +261,7 @@ pub async fn serve(
     pair: bool,
     tls: bool,
     allow_control: bool,
+    allow_manage: bool,
     should_advertise: bool,
 ) -> std::io::Result<()> {
     bind_rules(bind, tls).map_err(std::io::Error::other)?;
@@ -267,17 +270,23 @@ pub async fn serve(
         None => auth::Auth::in_memory(),
     };
     if pair {
-        let rights = if allow_control {
-            vec!["read".to_string(), "control".to_string()]
-        } else {
-            vec!["read".to_string()]
-        };
+        let mut rights = vec!["read".to_string()];
+        if allow_control {
+            rights.push("control".to_string());
+        }
+        if allow_manage {
+            rights.push(auth::RIGHT_MANAGE.to_string());
+        }
         match auth.start_pairing(
             "pairing from the command line".into(),
             auth::now_ms(),
             rights,
         ) {
-            Ok(code) => println!("Pairing code: {code} (valid for 5 minutes)"),
+            Ok(code) => notice::announce_pairing_code(
+                &code,
+                "ztop-agent",
+                ztop_core::paths::state_dir().as_deref(),
+            ),
             Err(error) => eprintln!("ztop-agent: pairing is unavailable: {error}"),
         }
     }
@@ -372,15 +381,37 @@ struct PairBody {
 /// a later TLS setup).
 async fn pair(State(state): State<Arc<AgentState>>, Json(body): Json<PairBody>) -> Response {
     let mut auth = state.auth.lock().expect("auth");
-    match auth.pair(&body.code, auth::now_ms()) {
+    pair_response(&mut auth, &body.code, "ztop-agent")
+}
+
+/// Answer one pairing attempt against `auth`: the token on success,
+/// 403 for a wrong, spent or expired code, 429 for a guess that came
+/// too soon after a wrong one. The agent and the hub share it, so the
+/// guessing rules hold on both doors. `service` names the server in
+/// the note printed when wrong guesses burn the code.
+pub fn pair_response(auth: &mut auth::Auth, code: &str, service: &str) -> Response {
+    let had_code = auth.pending_code().is_some();
+    match auth.pair(code, auth::now_ms()) {
         Ok(token) => Json(serde_json::json!({
             "protocol": PROTOCOL_VERSION,
             "token": token,
         }))
         .into_response(),
-        Err(auth::AuthError::BadCode) => (
-            StatusCode::FORBIDDEN,
-            "the pairing code does not match, is used up or expired",
+        Err(auth::AuthError::BadCode) => {
+            if had_code && auth.pending_code().is_none() {
+                eprintln!(
+                    "{service}: the pairing code was burned by wrong guesses or expired; restart with --pair for a new one"
+                );
+            }
+            (
+                StatusCode::FORBIDDEN,
+                "the pairing code does not match, is used up or expired",
+            )
+                .into_response()
+        }
+        Err(auth::AuthError::TooSoon) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many pairing attempts: wait a second and try again",
         )
             .into_response(),
         Err(error) => (
@@ -493,9 +524,55 @@ async fn control(
     .into_response()
 }
 
+/// The bearer token of a request, if it carries one.
+fn bearer_of(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+/// The gate in front of the token routes, on the agent and the hub:
+/// listing and revoking tokens needs a token with the `manage` right,
+/// whatever the transport. Plain loopback serving reads without a
+/// token, but token management never does: any local user can reach
+/// loopback. `None` lets the request through.
+pub fn refuse_unless_manager(
+    auth: &auth::Auth,
+    headers: &axum::http::HeaderMap,
+) -> Option<Response> {
+    let Some(token) = bearer_of(headers) else {
+        return Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                "token management needs a token with the manage right",
+            )
+                .into_response(),
+        );
+    };
+    if auth.can_manage(token) {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::FORBIDDEN,
+                "this token may not manage tokens: pair again from a server started with --pair --allow-manage",
+            )
+                .into_response(),
+        )
+    }
+}
+
 /// `GET /v1/tokens`: the accepted clients, oldest first.
-async fn tokens_list(State(state): State<Arc<AgentState>>) -> Response {
-    let tokens = state.auth.lock().expect("auth").list();
+async fn tokens_list(
+    State(state): State<Arc<AgentState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let auth = state.auth.lock().expect("auth");
+    if let Some(refusal) = refuse_unless_manager(&auth, &headers) {
+        return refusal;
+    }
+    let tokens = auth.list();
     Json(serde_json::json!({
         "protocol": PROTOCOL_VERSION,
         "tokens": tokens,
@@ -506,9 +583,14 @@ async fn tokens_list(State(state): State<Arc<AgentState>>) -> Response {
 /// `DELETE /v1/tokens/{id}`: revoke a token.
 async fn tokens_revoke(
     State(state): State<Arc<AgentState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    let revoked = state.auth.lock().expect("auth").revoke(&id);
+    let mut auth = state.auth.lock().expect("auth");
+    if let Some(refusal) = refuse_unless_manager(&auth, &headers) {
+        return refusal;
+    }
+    let revoked = auth.revoke(&id);
     if revoked {
         Json(serde_json::json!({
             "protocol": PROTOCOL_VERSION,
@@ -890,6 +972,105 @@ mod tests {
         assert_eq!(results[1]["pid"], 999_999_999);
         assert_eq!(results[1]["ok"], false);
         assert!(results[1]["error"].as_str().is_some_and(|e| !e.is_empty()));
+    }
+
+    /// Regression: the token routes sat behind the same check as a
+    /// snapshot, so a read-only token could list every client and
+    /// revoke the owner's control token, and plain loopback serving
+    /// let any local user do it with no token at all. Token management
+    /// now needs the `manage` right on every transport.
+    #[tokio::test]
+    async fn only_a_manage_token_lists_or_revokes_tokens() {
+        for enforced in [true, false] {
+            let inner = AgentState {
+                enforce_auth: enforced,
+                ..AgentState::default()
+            };
+            let state = Arc::new(inner);
+            let reader = control_token(&state, vec!["read".to_string()]);
+            let owner = control_token(&state, vec!["read".to_string(), "control".to_string()]);
+            let owner_id = state
+                .auth
+                .lock()
+                .expect("auth")
+                .list()
+                .into_iter()
+                .find(|record| record.rights.iter().any(|right| right == "control"))
+                .expect("the owner's record")
+                .id;
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind");
+            let address = listener.local_addr().expect("address");
+            let server_state = state.clone();
+            let server = tokio::spawn(async move { super::serve_on(server_state, listener).await });
+            let request = |method: &'static str, path: String, token: Option<String>| {
+                tokio::task::spawn_blocking(move || {
+                    raw_request(address, method, &path, token.as_deref(), None)
+                })
+            };
+            for token in [None, Some(reader.clone())] {
+                let (listed, _) = request("GET", "/v1/tokens".into(), token.clone())
+                    .await
+                    .expect("join");
+                assert!(
+                    listed == 401 || listed == 403,
+                    "enforced={enforced} token={token:?}: list answered {listed}"
+                );
+                let (revoked, _) =
+                    request("DELETE", format!("/v1/tokens/{owner_id}"), token.clone())
+                        .await
+                        .expect("join");
+                assert!(
+                    revoked == 401 || revoked == 403,
+                    "enforced={enforced} token={token:?}: revoke answered {revoked}"
+                );
+            }
+            assert!(
+                state.auth.lock().expect("auth").check(&owner),
+                "the owner's token must survive"
+            );
+            server.abort();
+        }
+    }
+
+    /// Regression: a control plan's pid went straight to `kill` as a
+    /// `c_int`, so 4294967295 meant `kill(-1, sig)`. The plan answers
+    /// per pid with a refusal and sends nothing (signal 0 here, so a
+    /// missing guard would still only probe).
+    #[tokio::test]
+    async fn control_refuses_pids_that_name_groups_or_everyone() {
+        let mut inner = AgentState {
+            allow_control: true,
+            ..AgentState::default()
+        };
+        inner.enforce_auth = true;
+        let state = Arc::new(inner);
+        let token = control_token(&state, vec!["read".to_string(), "control".to_string()]);
+        let response = control(
+            State(state),
+            bearer(&token),
+            Json(ControlBody {
+                pids: vec![u32::MAX, 0, 1 << 31],
+                action: ztop_core::control::Control::Signal(0),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: serde_json::Value =
+            serde_json::from_str(&body_text(response).await).expect("json");
+        let results = value["results"].as_array().expect("results");
+        assert_eq!(results.len(), 3);
+        for result in results {
+            assert_eq!(result["ok"], false, "{result}");
+            assert!(
+                result["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("not a process id")),
+                "{result}"
+            );
+        }
     }
 
     /// Pair a fresh token with exactly `rights` into the state's auth.
@@ -1282,8 +1463,9 @@ mod tests {
         server.abort();
     }
 
-    /// Tokens can be listed and revoked over the wire, and a revoked
-    /// token stops reading immediately.
+    /// Tokens can be listed and revoked over the wire by a token with
+    /// the `manage` right, and a revoked token stops reading
+    /// immediately.
     #[tokio::test]
     async fn tokens_can_be_listed_and_revoked_over_the_wire() {
         let inner = AgentState {
@@ -1294,7 +1476,11 @@ mod tests {
             .auth
             .lock()
             .expect("auth")
-            .start_pairing("the app".into(), auth::now_ms(), vec!["read".to_string()])
+            .start_pairing(
+                "the app".into(),
+                auth::now_ms(),
+                vec!["read".to_string(), "manage".to_string()],
+            )
             .expect("code");
         let state = Arc::new(inner);
         state.push(a_sample());

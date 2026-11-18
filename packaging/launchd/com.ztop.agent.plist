@@ -3,10 +3,16 @@
 <!--
   SPDX-License-Identifier: MIT OR Apache-2.0
 
-  User agent service for macOS. Install with:
+  User agent service for macOS. Install with (the sed fills in your
+  home directory for the log paths, which launchd needs absolute):
 
-      cp com.ztop.agent.plist ~/Library/LaunchAgents/
+      sed "s|/Users/YOU|$HOME|g" com.ztop.agent.plist \
+          > ~/Library/LaunchAgents/com.ztop.agent.plist
       launchctl load ~/Library/LaunchAgents/com.ztop.agent.plist
+
+  The log holds the pairing code, so it lives under ~/Library/Logs
+  (inside your private ~/Library), never in /tmp where every local
+  user can read it.
 
   The service is read-only: it serves TLS and pairing but does not
   pass --allow-control, so no client can signal or renice through it.
@@ -29,8 +35,8 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/ztop-agent.out</string>
+    <string>/Users/YOU/Library/Logs/ztop-agent.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/ztop-agent.err</string>
+    <string>/Users/YOU/Library/Logs/ztop-agent.log</string>
 </dict>
 </plist>

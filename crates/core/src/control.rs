@@ -91,11 +91,67 @@ pub fn signal_name(number: i32) -> String {
 /// and I/O priority or affinity changes on another process need
 /// privileges too). The Linux-only actions error on macOS.
 pub fn apply_one(pid: u32, action: Control) -> Result<(), String> {
+    check(pid, action)?;
     match action {
         Control::Signal(sig) => send_signal(pid, sig),
         Control::Renice(delta) => change_nice(pid, delta),
         Control::IoPriority(value) => set_io_priority(pid, value),
         Control::Affinity(mask) => set_affinity(pid, mask),
+    }
+}
+
+/// The largest renice step one action may take: the whole nice range
+/// (-20 to 19) is 39 steps wide, so anything larger is not a step.
+pub const MAX_RENICE_DELTA: i32 = 39;
+
+/// Refuse an action before any system call when it could reach more
+/// than the one process it names, or is not one the menus offer.
+///
+/// `kill`, `setpriority`, `ioprio_set` and `sched_setaffinity` give pid
+/// 0 and negative pids special meanings (the caller itself, its process
+/// group, every process it may signal), and a `u32` pid above
+/// `i32::MAX` turns negative when cast. A plan may arrive over the
+/// network (`POST /v1/control`), so the check lives here, in front of
+/// every caller.
+///
+/// # Errors
+///
+/// The reason the action was refused.
+pub fn check(pid: u32, action: Control) -> Result<(), String> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(format!("{pid} is not a process id"));
+    }
+    match action {
+        // Signal 0 is the permission probe: it sends nothing.
+        Control::Signal(0) => Ok(()),
+        Control::Signal(sig) => {
+            if common_signals().iter().any(|(_, number)| *number == sig) {
+                Ok(())
+            } else {
+                Err(format!("signal {sig} is not offered here"))
+            }
+        }
+        Control::Renice(delta) => {
+            if delta.unsigned_abs() <= MAX_RENICE_DELTA as u32 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "renice by {delta} is outside the nice range (at most {MAX_RENICE_DELTA} steps)"
+                ))
+            }
+        }
+        Control::IoPriority(value) => {
+            if io_priority_options()
+                .iter()
+                .any(|(_, known)| *known == value)
+            {
+                Ok(())
+            } else {
+                Err(format!("io priority {value:#06x} is not offered here"))
+            }
+        }
+        Control::Affinity(0) => Err("an affinity mask with no core is not offered".to_string()),
+        Control::Affinity(_) => Ok(()),
     }
 }
 
@@ -302,6 +358,71 @@ mod tests {
         assert_eq!(results[0].0, me);
         assert_eq!(results[0].1, Ok(()));
         assert!(results[1].1.is_err(), "an absent pid must error");
+    }
+
+    /// Regression: the pid was cast straight to `c_int`, so pid
+    /// 4294967295 became `kill(-1, sig)` (every process the user owns),
+    /// pid 0 the caller's own process group, and pids past `i32::MAX`
+    /// whole process groups. Only signal 0 is used here: if the guard
+    /// were missing, the probe still sends nothing.
+    #[test]
+    fn pids_that_name_groups_or_everyone_are_refused() {
+        for pid in [0, u32::MAX, 1 << 31, i32::MAX as u32 + 1] {
+            let result = apply_one(pid, Control::Signal(0));
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.contains("not a process id")),
+                "pid {pid} must be refused before any call: {result:?}"
+            );
+            for action in [
+                Control::Renice(1),
+                Control::IoPriority(2 << 13 | 4),
+                Control::Affinity(1),
+            ] {
+                let result = apply_one(pid, action);
+                assert!(
+                    result
+                        .as_ref()
+                        .is_err_and(|error| error.contains("not a process id")),
+                    "pid {pid} with {action:?} must be refused: {result:?}"
+                );
+            }
+        }
+    }
+
+    /// Only the catalog's signals (and 0, the permission probe) are
+    /// sent; the renice delta stays within the nice range's span; the
+    /// I/O priority must be one of the picker's values and the affinity
+    /// mask must name at least one core.
+    #[test]
+    fn actions_outside_the_catalog_are_refused() {
+        let me = std::process::id();
+        for sig in [-1, 99, 65, 131] {
+            let result = apply_one(me, Control::Signal(sig));
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.contains("not offered")),
+                "signal {sig} must be refused: {result:?}"
+            );
+        }
+        for delta in [40, -40, i32::MAX, i32::MIN] {
+            let result = apply_one(me, Control::Renice(delta));
+            assert!(
+                result.as_ref().is_err_and(|error| error.contains("renice")),
+                "delta {delta} must be refused: {result:?}"
+            );
+        }
+        let result = apply_one(me, Control::IoPriority(7 << 13));
+        assert!(result.is_err(), "{result:?}");
+        let result = apply_one(me, Control::Affinity(0));
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("no core")),
+            "{result:?}"
+        );
     }
 
     #[test]

@@ -45,10 +45,16 @@ requires
 Serve HTTPS with a self-signed certificate and require tokens.
 .TP
 .B \-\-pair
-Show a pairing code a client can trade for a token.
+Show a pairing code a client can trade for a token. The code is eight
+characters, valid for five minutes, and burned by five wrong guesses.
 .TP
 .B \-\-allow\-control
 Let paired tokens send signals and renice processes. Off by default.
+.TP
+.B \-\-allow\-manage
+Let the token paired with
+.B \-\-pair
+list and revoke tokens. Off by default; pair only your own client with it.
 .TP
 .B \-\-no\-advertise
 Skip the Bonjour advertisement that
@@ -73,6 +79,11 @@ The address to bind to (default: 127.0.0.1).
 .TP
 .B \-\-pair
 Print a pairing code so a client can pair with the hub.
+.TP
+.B \-\-allow\-manage
+Let the token paired with
+.B \-\-pair
+list and revoke hub tokens. Off by default.
 .TP
 .B \-\-tls
 Serve HTTPS with a self-signed certificate and enforce tokens.

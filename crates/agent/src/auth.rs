@@ -5,7 +5,8 @@
 //! sends it once over the paired connection, and it receives a
 //! long-lived token. Only the token's SHA-256 hash is stored, so a
 //! copy of the agent's files cannot be replayed as a token. Codes are
-//! single-use and expire; tokens can be listed and revoked.
+//! single-use and expire, and a few wrong guesses burn them; tokens can
+//! be listed and revoked by a token holding the `manage` right.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,8 +17,22 @@ use sha2::{Digest, Sha256};
 /// How long a pairing code stays valid.
 pub const PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// Six characters, unambiguous: no `0`, `1`, `l` or `o`.
+/// Unambiguous symbols: no `0`, `1`, `i`, `l` or `o`.
 const CODE_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+
+/// Symbols per code: 31^8, about 8.5 * 10^11 codes.
+pub const CODE_LENGTH: usize = 8;
+
+/// Wrong guesses one code survives: the next wrong guess after these
+/// burns it, so a guessing client gets five tries per printed code.
+pub const MAX_WRONG_GUESSES: u32 = 5;
+
+/// The least time between a wrong guess and the next attempt; an
+/// attempt sooner is refused without being counted.
+pub const GUESS_SPACING: Duration = Duration::from_secs(1);
+
+/// The right to list and revoke tokens.
+pub const RIGHT_MANAGE: &str = "manage";
 
 /// Why pairing or a token check failed.
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +40,9 @@ pub enum AuthError {
     /// No pairing code is pending, it does not match, or it expired.
     #[error("the pairing code does not match, is used up or expired")]
     BadCode,
+    /// A guess came too soon after a wrong one; try again in a second.
+    #[error("too many pairing attempts: wait a second and try again")]
+    TooSoon,
     /// The tokens file could not be read or written.
     #[error("the tokens file failed: {0}")]
     Io(#[from] std::io::Error),
@@ -44,8 +62,9 @@ pub struct TokenRecord {
     /// When the token was created (unix ms).
     pub created_ms: u64,
     /// What this token may do: `"read"` always, plus `"control"` when
-    /// the agent pairs with control allowed. Records saved before the
-    /// rights existed read as read-only.
+    /// the agent pairs with control allowed and `"manage"` (list and
+    /// revoke tokens) when it pairs with management allowed. Records
+    /// saved before the rights existed read as read-only.
     #[serde(default = "default_rights")]
     pub rights: Vec<String>,
 }
@@ -66,6 +85,8 @@ struct Pending {
     label: String,
     expires_ms: u64,
     rights: Vec<String>,
+    /// Wrong guesses so far against this code.
+    wrong: u32,
 }
 
 /// The pairing and token state behind the agent's auth.
@@ -78,6 +99,8 @@ pub struct Auth {
     tokens: HashMap<String, TokenRecord>,
     /// The one pending pairing code, if any.
     pending: Option<Pending>,
+    /// When the last wrong guess came (unix ms), for the spacing rule.
+    last_wrong_ms: Option<u64>,
 }
 
 impl Auth {
@@ -92,6 +115,7 @@ impl Auth {
             path: Some(path),
             tokens: HashMap::new(),
             pending: None,
+            last_wrong_ms: None,
         };
         auth.reload()?;
         Ok(auth)
@@ -165,38 +189,62 @@ impl Auth {
         now_ms: u64,
         rights: Vec<String>,
     ) -> Result<String, AuthError> {
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).map_err(|_| {
-            AuthError::Io(std::io::Error::other("no randomness for the pairing code"))
-        })?;
-        let code: String = bytes
-            .iter()
-            .take(6)
-            .map(|byte| CODE_ALPHABET[(*byte as usize) % CODE_ALPHABET.len()] as char)
-            .collect();
+        // Rejection sampling: only bytes below the largest multiple of
+        // the alphabet's size are used, so every symbol is equally
+        // likely (a plain modulo favors the first 256 % 31 symbols).
+        let limit = (256 / CODE_ALPHABET.len() * CODE_ALPHABET.len()) as u8;
+        let mut code = String::with_capacity(CODE_LENGTH);
+        while code.len() < CODE_LENGTH {
+            let mut bytes = [0u8; 32];
+            getrandom::fill(&mut bytes).map_err(|_| {
+                AuthError::Io(std::io::Error::other("no randomness for the pairing code"))
+            })?;
+            for byte in bytes.into_iter().filter(|byte| *byte < limit) {
+                if code.len() == CODE_LENGTH {
+                    break;
+                }
+                code.push(CODE_ALPHABET[byte as usize % CODE_ALPHABET.len()] as char);
+            }
+        }
         self.pending = Some(Pending {
             code,
             label,
             expires_ms: now_ms + PAIRING_TTL.as_millis() as u64,
             rights,
+            wrong: 0,
         });
+        self.last_wrong_ms = None;
         Ok(self.pending.as_ref().expect("just set").code.clone())
     }
 
     /// Trade a pairing code for a token. The code is single-use and
     /// must not be expired; the raw token is returned exactly once and
     /// only its hash is kept.
+    ///
+    /// A guess within [`GUESS_SPACING`] of a wrong one is refused with
+    /// [`AuthError::TooSoon`] and not counted; the
+    /// [`MAX_WRONG_GUESSES`]th wrong guess burns the code, and the
+    /// person at the machine starts a new pairing.
     pub fn pair(&mut self, code: &str, now_ms: u64) -> Result<String, AuthError> {
-        let pending = match &self.pending {
-            Some(pending) if pending.code == code && pending.expires_ms > now_ms => Pending {
-                code: pending.code.clone(),
-                label: pending.label.clone(),
-                expires_ms: pending.expires_ms,
-                rights: pending.rights.clone(),
-            },
-            _ => return Err(AuthError::BadCode),
-        };
-        self.pending = None;
+        if let Some(last) = self.last_wrong_ms {
+            if now_ms < last.saturating_add(GUESS_SPACING.as_millis() as u64) {
+                return Err(AuthError::TooSoon);
+            }
+        }
+        let matches = self.pending.as_ref().is_some_and(|pending| {
+            pending.expires_ms > now_ms && same_code(pending.code.as_bytes(), code.as_bytes())
+        });
+        if !matches {
+            self.last_wrong_ms = Some(now_ms);
+            if let Some(pending) = &mut self.pending {
+                pending.wrong += 1;
+                if pending.wrong >= MAX_WRONG_GUESSES || pending.expires_ms <= now_ms {
+                    self.pending = None;
+                }
+            }
+            return Err(AuthError::BadCode);
+        }
+        let pending = self.pending.take().expect("matched a pending code");
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes)
             .map_err(|_| AuthError::Io(std::io::Error::other("no randomness for the token")))?;
@@ -228,8 +276,19 @@ impl Auth {
 
     /// Does this bearer token carry the `control` right?
     pub fn can_control(&self, token: &str) -> bool {
+        self.has_right(token, "control")
+    }
+
+    /// Does this bearer token carry the `manage` right (list and revoke
+    /// tokens)?
+    pub fn can_manage(&self, token: &str) -> bool {
+        self.has_right(token, RIGHT_MANAGE)
+    }
+
+    /// Does this bearer token carry `right`?
+    fn has_right(&self, token: &str, right: &str) -> bool {
         self.record_of(token)
-            .is_some_and(|record| record.rights.iter().any(|right| right == "control"))
+            .is_some_and(|record| record.rights.iter().any(|held| held == right))
     }
 
     /// The record a bearer token belongs to.
@@ -262,6 +321,20 @@ impl Auth {
     }
 }
 
+/// Compare two codes without stopping at the first differing byte, so
+/// the time a refusal takes says nothing about how much of a guess was
+/// right.
+fn same_code(expected: &[u8], guess: &[u8]) -> bool {
+    if expected.len() != guess.len() {
+        return false;
+    }
+    expected
+        .iter()
+        .zip(guess)
+        .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
+}
+
 /// Lowercase hex, std-only.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -287,7 +360,7 @@ mod tests {
         let code = auth
             .start_pairing("the app".into(), NOW, vec!["read".to_string()])
             .expect("code");
-        assert_eq!(code.len(), 6);
+        assert_eq!(code.len(), CODE_LENGTH);
         assert!(!code.contains('0') && !code.contains('l'));
 
         let token = auth.pair(&code, NOW + 1_000).expect("token");
@@ -316,6 +389,64 @@ mod tests {
             Err(AuthError::BadCode)
         ));
         assert!(auth.list().is_empty());
+    }
+
+    /// Regression: a wrong guess left the code valid and nothing
+    /// limited the rate, so the code space (six symbols of 31, about
+    /// 887 million) fell to a guessing client in hours. Five wrong
+    /// guesses now burn the code, guesses are spaced, and codes are
+    /// eight symbols long.
+    #[test]
+    fn wrong_guesses_burn_the_code() {
+        let mut auth = Auth::in_memory();
+        let code = auth
+            .start_pairing("the app".into(), NOW, vec!["read".to_string()])
+            .expect("code");
+        let mut at = NOW;
+        for _ in 0..MAX_WRONG_GUESSES {
+            assert!(matches!(
+                auth.pair("wrongcode", at),
+                Err(AuthError::BadCode)
+            ));
+            at += GUESS_SPACING.as_millis() as u64;
+        }
+        assert!(auth.pending_code().is_none(), "the code must be burned");
+        assert!(matches!(auth.pair(&code, at), Err(AuthError::BadCode)));
+        assert!(auth.list().is_empty());
+    }
+
+    #[test]
+    fn guesses_right_after_a_wrong_one_wait() {
+        let mut auth = Auth::in_memory();
+        let code = auth
+            .start_pairing("the app".into(), NOW, vec!["read".to_string()])
+            .expect("code");
+        assert!(matches!(
+            auth.pair("wrongcode", NOW),
+            Err(AuthError::BadCode)
+        ));
+        // Too soon: refused without counting, and the code survives.
+        assert!(matches!(
+            auth.pair(&code, NOW + 10),
+            Err(AuthError::TooSoon)
+        ));
+        let later = NOW + GUESS_SPACING.as_millis() as u64;
+        assert!(auth.pair(&code, later).is_ok());
+    }
+
+    #[test]
+    fn codes_are_long_and_drawn_from_the_alphabet() {
+        let mut auth = Auth::in_memory();
+        for _ in 0..200 {
+            let code = auth
+                .start_pairing("the app".into(), NOW, vec!["read".to_string()])
+                .expect("code");
+            assert_eq!(code.len(), CODE_LENGTH);
+            assert!(
+                code.bytes().all(|byte| CODE_ALPHABET.contains(&byte)),
+                "{code}"
+            );
+        }
     }
 
     #[test]
