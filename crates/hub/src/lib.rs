@@ -666,10 +666,9 @@ pub async fn serve(
         })?;
         let material = ztop_agent::tls::load_or_create(&dir.join("hub"))?;
         println!("TLS fingerprint: {}", material.fingerprint);
-        return ztop_agent::tls::serve_router_on_tls(listener, material.config, router(state))
-            .await;
+        return ztop_agent::serving::serve(listener, Some(material.config), router(state)).await;
     }
-    axum::serve(listener, router(state)).await
+    ztop_agent::serving::serve(listener, None, router(state)).await
 }
 
 /// Start one poller per agent plus the retention prune. Each poller

@@ -3,13 +3,15 @@
 Updated after every working session.
 
 - **Current milestone:** 0.1.0, first public release from this repository.
-- **Last done:** Moved here as the open-source engine; the zTop app is developed separately. Fixed the agent's history ring keeping a full process list per sample (memory grew for an hour after start).
-- **Next step:** measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
+- **Last done:** Fixed the findings of a security and correctness audit in five pull requests: the syscall tracer (decision 0060), auth and control (0061), hub retention (0062), the live Linux collector (0063), and serving that survives the network (0064).
+- **Next step:** merge the five audit fixes, then measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
 - **Blocked on:** nothing.
 
 ## Log
 
 Newest first. One or two lines per session: what changed, what is next.
+
+- 2026-11-18 (audit): Fixed the audit findings, regression test first for each. Tracer requests all come from the tracer thread, so closing a trace detaches (0060). Control refuses pid 0, group pids and signals outside the catalog; token listing and revoking need the new `manage` right; pairing codes are eight symbols, burned by five wrong guesses and spaced a second apart; launchd logs leave /tmp (0061). The hub prunes past 24 h, stores history without process lists and caps windows at an hour (0062). The live Linux collector reads command lines, finds mounted disks by their diskstats name and keeps core numbers across offline cores (0063). One accept loop with deadlines and a connection cap serves the agent and the hub (0064). Next: merge, then the full-hour budget run.
 
 - 2026-11-18: First public release here. The app moved to its own repository; the history ring now drops process lists (regression test `the_history_ring_drops_process_lists_but_the_latest_keeps_them`); a 120 s Linux measurement stays within budget (under 1% CPU, 9 MB). The earlier macOS runs on a loaded host (1.4-1.6% CPU, 33-48 MB and growing) predate this fix. Next: a full-hour budget run on macOS and Linux.
 

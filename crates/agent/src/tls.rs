@@ -105,35 +105,5 @@ pub async fn serve_on_tls(
     listener: tokio::net::TcpListener,
     config: rustls::ServerConfig,
 ) -> io::Result<()> {
-    serve_router_on_tls(listener, config, crate::router(state)).await
-}
-
-/// Serve any axum router over TLS on an already-bound listener: the
-/// hub (and any future service) rides the same handshake rules as
-/// the agent. A failed handshake just drops that connection.
-pub async fn serve_router_on_tls(
-    listener: tokio::net::TcpListener,
-    config: rustls::ServerConfig,
-    router: axum::Router,
-) -> io::Result<()> {
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let router = router.clone();
-        tokio::spawn(async move {
-            let tls_stream = match acceptor.accept(stream).await {
-                Ok(stream) => stream,
-                Err(_) => return,
-            };
-            let service = hyper_util::service::TowerToHyperService::new(router.clone());
-            let _ =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection_with_upgrades(
-                        hyper_util::rt::TokioIo::new(tls_stream),
-                        service,
-                    )
-                    .await;
-        });
-    }
+    crate::serving::serve(listener, Some(config), crate::router(state)).await
 }

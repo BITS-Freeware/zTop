@@ -14,6 +14,8 @@
 pub mod auth;
 pub mod notice;
 pub mod tls;
+// The accept loop the agent and the hub serve through (decision 0064).
+pub mod serving;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -333,7 +335,7 @@ pub async fn serve_on(
     state: Arc<AgentState>,
     listener: tokio::net::TcpListener,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router(state)).await
+    serving::serve(listener, None, router(state)).await
 }
 
 /// Start the sampler thread for this platform. The collector is built

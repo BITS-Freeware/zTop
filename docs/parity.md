@@ -350,7 +350,7 @@ Check an item only when it works and a test or a recorded check shows it. Add th
     agent, so `ztop connect` to a hub works unchanged. Pairing and
     tokens are the hub's own (the agent's `auth` module,
     `state_dir()/hub/tokens.json`); TLS and auth reuse the agent's
-    `serve_router_on_tls`/`enforce_auth` verbatim. Tests:
+    `serving::serve`/`enforce_auth` verbatim (decision 0064). Tests:
     `the_hub_polls_two_agents_and_serves_the_fleet` (two real TLS
     agents in-process), `store_round_trips_and_prunes`,
     `history_serves_the_stored_window`,
