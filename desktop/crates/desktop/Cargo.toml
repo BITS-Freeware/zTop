@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+[package]
+name = "ztop-desktop"
+description = "The zTop Linux desktop app (GTK4 and libadwaita)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ztop-desktop"
+path = "src/main.rs"
+
+[dependencies]
+ztop-desktop-core = { path = "../desktop-core", version = "0.1.0" }
+ztop-core = { workspace = true }
+gtk = { workspace = true }
+adw = { workspace = true }
+libsecret = { workspace = true }

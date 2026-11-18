@@ -376,6 +376,18 @@ Check an item only when it works and a test or a recorded check shows it. Add th
 
 The zTop app for iPad and Mac is developed separately and tracks its own items. This repository covers everything the app talks to: the agent, the hub and the protocol above.
 
+## zTop for Linux
+
+The desktop app in `desktop/` (decision 0065), milestone by milestone (ROADMAP.md, L1 to L5).
+
+- [x] Add a host by hand, and pair — the add-host dialog (address, port, optional SHA256 fingerprint and pairing code) pairs through `ztop-core`'s `pair_with` before saving, and a card whose token is refused offers Pair. Tested live (`pairing_turns_a_refused_read_into_a_live_one`: a real 401 reads as "needs pairing", the printed code pairs, a used or wrong code does not). Recorded: `docs/screenshots/desktop-add-host.png`.
+- [x] Fleet overview with live cards; stale and unreachable hosts obvious — `desktop/scripts/recorded-run.sh` pairs two TLS agents (`host-a`, `host-b`, loopback) with tokens in a throwaway gnome-keyring and checks the app's own report: both live (`desktop-overview.png`), then host-b stale after its agent stops (`desktop-stale.png`) and unreachable past 10 s (`desktop-unreachable.png`). Freshness rules unit-tested and tested live (`a_wrong_pin_fails_and_a_stopped_agent_goes_stale`).
+- [x] Tokens kept in the desktop keyring — the libsecret store is tested against a real gnome-keyring in CI (`tokens_round_trip_through_the_keyring`); the 0600-file fallback is tested and announced by a banner.
+- [ ] Host detail with charts for every metric (L2)
+- [ ] Process list: search, sort and, where allowed, signals (L3)
+- [ ] Add a host found by Bonjour; alerts with desktop notifications; the fleet through a hub (L4)
+- [ ] .deb and Flatpak packages (L5)
+
 ## Packaging
 
 - [x] Homebrew formula with a `brew services` agent

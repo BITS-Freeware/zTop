@@ -2,14 +2,16 @@
 
 Updated after every working session.
 
-- **Current milestone:** 0.1.0, first public release from this repository.
-- **Last done:** Fixed the findings of a security and correctness audit in five pull requests: the syscall tracer (decision 0060), auth and control (0061), hub retention (0062), the live Linux collector (0063), and serving that survives the network (0064).
-- **Next step:** merge the five audit fixes, then measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
+- **Current milestone:** zTop for Linux, L1 (fleet list and pairing), after the 0.1.0 release.
+- **Last done:** zTop for Linux L1, a GTK4 desktop app in `desktop/` (decision 0065), after the five audit fixes (decisions 0060-0064) merged.
+- **Next step:** zTop for Linux L2 (host detail); measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
 - **Blocked on:** nothing.
 
 ## Log
 
 Newest first. One or two lines per session: what changed, what is next.
+
+- 2026-11-18 (desktop): zTop for Linux, L1 (decision 0065): `desktop/` workspace with `ztop-desktop-core` (hosts.json, libsecret and 0600-file token stores, live/stale/unreachable/needs-pairing, card figures, reads and pairing through `ztop-core`; 17 tests incl. live agents and a real keyring) and the GTK4/libadwaita window. Recorded runs `desktop-overview.png`, `desktop-stale.png`, `desktop-unreachable.png`, `desktop-add-host.png`; a Desktop workflow runs `desktop/scripts/check.sh`. Next: L2, host detail.
 
 - 2026-11-18 (audit): Fixed the audit findings, regression test first for each. Tracer requests all come from the tracer thread, so closing a trace detaches (0060). Control refuses pid 0, group pids and signals outside the catalog; token listing and revoking need the new `manage` right; pairing codes are eight symbols, burned by five wrong guesses and spaced a second apart; launchd logs leave /tmp (0061). The hub prunes past 24 h, stores history without process lists and caps windows at an hour (0062). The live Linux collector reads command lines, finds mounted disks by their diskstats name and keeps core numbers across offline cores (0063). One accept loop with deadlines and a connection cap serves the agent and the hub (0064). Next: merge, then the full-hour budget run.
 

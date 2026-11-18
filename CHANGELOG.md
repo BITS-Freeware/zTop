@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **zTop for Linux** (`desktop/`): a GTK4 and libadwaita desktop app. Add an agent or hub by address, TLS fingerprint and pairing code; every host gets a card with its live, stale, unreachable or needs-pairing state, CPU, memory and uptime. Tokens go to the desktop keyring (decision 0065).
+
 ## [0.1.0] - 2026-11-18
 
 First public release.
