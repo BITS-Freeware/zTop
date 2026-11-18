@@ -99,14 +99,14 @@ Check an item only when it works and a test or a recorded check shows it. Add th
       `the_tracer_refuses_a_gone_pid`, `syscall_names_cover_the_hot_path`,
       `the_trace_overlay_renders_and_scrolls`, `the_trace_overlay_starts_empty`,
       `s_reports_a_failed_start_and_stays_closed`, `s_traces_a_child_and_esc_stops`,
-      `the_status_hints_replay_the_trace_key` — corrected by decision
-      0040: the live ptrace test no longer runs to failure on CI Linux
-      (ubuntu-latest accepts the seize but delivers no stops, observed
-      2026-11-15, which first failed the test and then, after the
-      buffering fixes, hung CI for hours); it skips with a clear note
-      there and stays a real assertion where ptrace stops flow, while
-      every ptrace wait is now bounded so a silent sandbox can never
-      park the tracer thread or `Drop`'s join)
+      `the_status_hints_replay_the_trace_key`,
+      `closing_a_trace_leaves_the_process_running`,
+      `closing_a_trace_detaches_a_process_inside_a_long_syscall`,
+      `a_process_can_be_traced_twice` — corrected by decision 0060:
+      every ptrace request now comes from the tracer thread, the seize
+      sets `PTRACE_O_TRACESYSGOOD`, and the live tests no longer skip
+      on silence; the "CI seizes but delivers no stops" reading in
+      decision 0040 was this bug)
 - [x] Highlight new and dying processes, and large numbers
       (new: yellow row, pid not in the previous sample's set; dying:
       red row for state `Z`; large numbers: CPU% >= 100 and MEM% >= 50

@@ -7,7 +7,10 @@
 //! The tracer runs on its own thread (`PTRACE_SEIZE` +
 //! `PTRACE_GET_SYSCALL_INFO`, so no per-architecture register layouts),
 //! keeps the newest lines in a capped ring, and stops with
-//! `PTRACE_INTERRUPT` + `PTRACE_DETACH` when dropped. Every other
+//! `PTRACE_INTERRUPT` + `PTRACE_DETACH` when dropped. Every ptrace
+//! request — the seize, each wait and resume, and the detach — is made
+//! from that one thread: Linux binds a tracee to the thread that
+//! attached, and refuses every other thread's requests with `ESRCH`. Every other
 //! platform refuses up front: macOS has no user-space ptrace tracing
 //! without special entitlements, so ztop reports unavailable there
 //! instead of pretending.
@@ -37,12 +40,10 @@ impl std::fmt::Debug for Trace {
 #[cfg(target_os = "linux")]
 impl Drop for Trace {
     fn drop(&mut self) {
+        // Only the tracer thread may make ptrace requests for this
+        // tracee, so the drop just raises the flag: the thread sees it
+        // within one poll, interrupts, detaches, and exits.
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        // Wake the waiter so the thread sees the stop flag; an ESRCH or
-        // permission failure here just means the tracee is already gone.
-        unsafe {
-            libc::ptrace(libc::PTRACE_INTERRUPT, self.pid as libc::pid_t, 0, 0);
-        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -100,30 +101,48 @@ pub fn start(pid: u32) -> Result<TraceHandle, String> {
 #[cfg(target_os = "linux")]
 pub fn start(pid: u32) -> Result<TraceHandle, String> {
     let pid_t = pid as libc::pid_t;
-    // SEIZE with PTRACE_O_TRACESYSGOOD is not needed for
-    // GET_SYSCALL_INFO, but seizing is: it attaches without stopping the
-    // tracee and marks the tracer as its listener.
-    let seized = unsafe { libc::ptrace(libc::PTRACE_SEIZE, pid_t, 0, 0) };
-    if seized != 0 {
-        return Err(format!("ptrace {pid}: {}", std::io::Error::last_os_error()));
-    }
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let lines = std::sync::Arc::new(std::sync::Mutex::new(
         std::collections::VecDeque::with_capacity(RING_LINES),
     ));
     let thread_stop = stop.clone();
     let thread_lines = lines.clone();
+    // The seize happens on the tracer thread, which reports its outcome
+    // back before tracing: the thread that attaches is the only one the
+    // kernel accepts later requests from.
+    let (attached_tx, attached_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
     let thread = std::thread::Builder::new()
         .name(format!("ztop-trace-{pid}"))
-        .spawn(move || trace_loop(pid_t, thread_stop, thread_lines))
-        .map_err(|e| {
-            // The tracee must not stay attached (and group-stopped by
-            // the tracer's first interrupt) when no tracer runs.
-            unsafe {
-                libc::ptrace(libc::PTRACE_DETACH, pid_t, 0, 0);
+        .spawn(move || {
+            // Seizing attaches without stopping the tracee and marks
+            // this thread as its tracer. PTRACE_O_TRACESYSGOOD is
+            // required: without it a syscall stop is reported as a
+            // plain SIGTRAP, and GET_SYSCALL_INFO answers "none" for
+            // every stop, so no line would ever be recorded.
+            let seized = unsafe {
+                libc::ptrace(
+                    libc::PTRACE_SEIZE,
+                    pid_t,
+                    0,
+                    libc::PTRACE_O_TRACESYSGOOD as *mut libc::c_void,
+                )
+            };
+            if seized != 0 {
+                let error = std::io::Error::last_os_error();
+                let _ = attached_tx.send(Err(format!("ptrace {pid}: {error}")));
+                return;
             }
-            format!("trace thread: {e}")
-        })?;
+            let _ = attached_tx.send(Ok(()));
+            trace_loop(pid_t, &thread_stop, &thread_lines);
+        })
+        .map_err(|e| format!("trace thread: {e}"))?;
+    let attached = attached_rx
+        .recv()
+        .unwrap_or_else(|_| Err(format!("ptrace {pid}: the trace thread ended")));
+    if let Err(error) = attached {
+        let _ = thread.join();
+        return Err(error);
+    }
     Ok(Trace {
         pid,
         stop,
@@ -139,24 +158,57 @@ pub fn start(pid: u32) -> Result<TraceHandle, String> {
 #[cfg(target_os = "linux")]
 const WALL: libc::c_int = 0x4000_0000;
 
+/// What one wait for the tracee saw.
+#[cfg(target_os = "linux")]
+enum Waited {
+    /// A ptrace stop, with its waitpid status: the tracee is parked
+    /// and this thread may read, resume, or detach it.
+    Stopped(libc::c_int),
+    /// The tracee exited or was killed; there is nothing to detach.
+    Gone,
+    /// The caller asked to stop while the tracee was running.
+    StopRequested,
+    /// No stop arrived before the deadline.
+    TimedOut,
+}
+
 /// Wait for one stop from `pid` without ever blocking: poll `waitpid`
-/// with `WNOHANG` and sleep between rounds, checking `stop` each round.
+/// with `WNOHANG`, checking `stop` (when given) and `deadline` (when
+/// given) each round.
 ///
 /// A blocking `waitpid` here would park the thread forever on a kernel
-/// or sandbox that accepts the seize but never delivers the stop —
-/// observed on CI runners — and then `Drop`'s join would hang with it.
-/// With the poll, `Drop` always ends the wait within one 20 ms sleep.
-/// Returns `None` when the tracee is gone or `stop` was set.
+/// or sandbox that accepts the seize but never delivers the stop, and
+/// then `Drop`'s join would hang with it. With the poll, `Drop` always
+/// ends the wait within one 20 ms sleep.
+///
+/// The poll backs off: the next stop of a busy tracee usually comes
+/// within microseconds, so the first rounds only yield, then the sleeps
+/// grow from 1 ms to 20 ms for a tracee parked in a long syscall. A
+/// flat 20 ms sleep per round would cost the tracee about 40 ms per
+/// syscall (an entry and an exit stop) — a 25-syscalls-a-second crawl.
 #[cfg(target_os = "linux")]
-fn wait_stopped(pid: libc::pid_t, stop: &std::sync::atomic::AtomicBool) -> Option<libc::c_int> {
+fn wait_stopped(
+    pid: libc::pid_t,
+    stop: Option<&std::sync::atomic::AtomicBool>,
+    deadline: Option<std::time::Instant>,
+) -> Waited {
+    /// Rounds that only yield before the first sleep.
+    const SPIN_ROUNDS: u32 = 64;
+    let mut idle_rounds: u32 = 0;
     loop {
-        if stop.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
+        if stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::SeqCst)) {
+            return Waited::StopRequested;
         }
         let mut status: libc::c_int = 0;
         let waited = unsafe { libc::waitpid(pid, &mut status, WALL | libc::WNOHANG) };
         if waited > 0 {
-            return Some(status);
+            if libc::WIFSTOPPED(status) {
+                return Waited::Stopped(status);
+            }
+            if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+                return Waited::Gone;
+            }
+            continue;
         }
         if waited < 0 {
             let error = std::io::Error::last_os_error();
@@ -164,21 +216,104 @@ fn wait_stopped(pid: libc::pid_t, stop: &std::sync::atomic::AtomicBool) -> Optio
                 continue;
             }
             // ECHILD: the tracee is gone (or reaped elsewhere).
-            return None;
+            return Waited::Gone;
         }
-        // No stop yet: sleep one poll, then look again.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            return Waited::TimedOut;
+        }
+        // No stop yet: yield or sleep one backed-off poll, then look
+        // again.
+        idle_rounds = idle_rounds.saturating_add(1);
+        if idle_rounds <= SPIN_ROUNDS {
+            std::thread::yield_now();
+        } else {
+            let doublings = (idle_rounds - SPIN_ROUNDS - 1).min(5);
+            let millis = (1u64 << doublings).min(20);
+            std::thread::sleep(std::time::Duration::from_millis(millis));
+        }
     }
 }
 
-/// The tracer thread: wait for stops, read one syscall-info record per
-/// stop, and resume. Exit events become lines, named by the entry that
-/// preceded them; entry events just resume.
+/// Read the syscall-info record for the stop the tracee is parked in.
+/// The buffer size goes in the addr argument and the buffer itself in
+/// data — a zero size would leave the buffer unfilled. `None` when the
+/// kernel refuses the read.
+#[cfg(target_os = "linux")]
+fn syscall_info(pid: libc::pid_t) -> Option<libc::ptrace_syscall_info> {
+    let mut info: libc::ptrace_syscall_info = unsafe { std::mem::zeroed() };
+    let read = unsafe {
+        libc::ptrace(
+            libc::PTRACE_GET_SYSCALL_INFO,
+            pid,
+            std::mem::size_of::<libc::ptrace_syscall_info>() as *mut libc::c_void,
+            &mut info as *mut libc::ptrace_syscall_info as *mut libc::c_void,
+        )
+    };
+    (read > 0).then_some(info)
+}
+
+/// The signal to hand back when resuming (or detaching) from a stop.
+/// A stop that is not a syscall stop is a signal-delivery or event
+/// stop; real signals pass through unchanged. SIGTRAP and SIGSTOP
+/// belong to the tracer machinery itself, and event stops encode their
+/// kind in the stop-signal bits — not a deliverable signal.
+#[cfg(target_os = "linux")]
+fn passed_signal(status: libc::c_int, info: Option<&libc::ptrace_syscall_info>) -> libc::c_int {
+    let syscall_stop = info.is_some_and(|info| info.op != libc::PTRACE_SYSCALL_INFO_NONE);
+    if syscall_stop {
+        return 0;
+    }
+    match libc::WSTOPSIG(status) {
+        libc::SIGTRAP | libc::SIGSTOP => 0,
+        sig if sig < 128 => sig,
+        _ => 0,
+    }
+}
+
+/// Let the tracee go. Called from the tracer thread only, and only
+/// while the tracee is parked in a ptrace stop, which is the one state
+/// `PTRACE_DETACH` accepts; `signal` is the stop's pending signal, if
+/// it was a signal-delivery stop, so detaching never swallows one.
+#[cfg(target_os = "linux")]
+fn detach(pid: libc::pid_t, signal: libc::c_int) {
+    unsafe {
+        libc::ptrace(libc::PTRACE_DETACH, pid, 0, signal as *mut libc::c_void);
+    }
+}
+
+/// How long the tracer waits for the tracee to park after the stop
+/// interrupt before giving up on a clean detach.
+#[cfg(target_os = "linux")]
+const DETACH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Stop tracing a running tracee: interrupt it, wait for it to park,
+/// and detach from that stop. If it never parks (it exited, or the
+/// kernel delivered nothing), the detach is still attempted; the
+/// kernel also detaches when this thread's process exits.
+#[cfg(target_os = "linux")]
+fn interrupt_and_detach(pid: libc::pid_t) {
+    unsafe {
+        libc::ptrace(libc::PTRACE_INTERRUPT, pid, 0, 0);
+    }
+    match wait_stopped(pid, None, Some(std::time::Instant::now() + DETACH_WAIT)) {
+        Waited::Stopped(status) => {
+            let info = syscall_info(pid);
+            detach(pid, passed_signal(status, info.as_ref()));
+        }
+        Waited::Gone => {}
+        Waited::StopRequested | Waited::TimedOut => detach(pid, 0),
+    }
+}
+
+/// The tracer thread, after a successful seize: wait for stops, read
+/// one syscall-info record per stop, and resume. Exit events become
+/// lines, named by the entry that preceded them; entry events just
+/// resume. Ends by detaching, on this same thread, when `stop` is set.
 #[cfg(target_os = "linux")]
 fn trace_loop(
     pid: libc::pid_t,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    lines: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    stop: &std::sync::atomic::AtomicBool,
+    lines: &std::sync::Mutex<std::collections::VecDeque<String>>,
 ) {
     // Kick the tracee: a seized tracee that is already running produces
     // no stops on its own, so waiting alone would never see a syscall.
@@ -193,83 +328,55 @@ fn trace_loop(
     // exit record carries no number, so the line's name comes from the
     // entry that preceded the exit.
     let mut current: Option<u64> = None;
-    while let Some(status) = wait_stopped(pid, &stop) {
-        if libc::WIFSTOPPED(status) {
-            // Ask the kernel what kind of stop this is: the buffer size
-            // goes in the addr argument and the buffer itself in data —
-            // a zero size would leave the buffer unfilled. An exit stop
-            // reports the return value and an error flag but carries no
-            // syscall number; the entry stop carried that.
-            let mut info: libc::ptrace_syscall_info = unsafe { std::mem::zeroed() };
-            let read = unsafe {
-                libc::ptrace(
-                    libc::PTRACE_GET_SYSCALL_INFO,
-                    pid,
-                    std::mem::size_of::<libc::ptrace_syscall_info>() as *mut libc::c_void,
-                    &mut info as *mut libc::ptrace_syscall_info as *mut libc::c_void,
-                )
-            };
-            if read > 0 {
-                match info.op {
-                    libc::PTRACE_SYSCALL_INFO_ENTRY => {
-                        current = Some(unsafe { info.u.entry.nr });
-                    }
-                    libc::PTRACE_SYSCALL_INFO_EXIT => {
-                        // An exit without the entry we traced — the
-                        // syscall the tracee was interrupted in at
-                        // attach — has no number to name; the restarted
-                        // syscall reports its own entry soon after.
-                        if let Some(nr) = current.take() {
-                            let (sval, is_error) =
-                                unsafe { (info.u.exit.sval, info.u.exit.is_error) };
-                            let line = if is_error != 0 {
-                                format!("{} = -{}", syscall_name(nr), -sval)
-                            } else {
-                                format!("{} = {sval:#x}", syscall_name(nr))
-                            };
-                            let mut ring = lines.lock().expect("trace ring");
-                            if ring.len() == RING_LINES {
-                                ring.pop_front();
-                            }
-                            ring.push_back(line);
+    loop {
+        let status = match wait_stopped(pid, Some(stop), None) {
+            Waited::Stopped(status) => status,
+            Waited::Gone | Waited::TimedOut => return,
+            Waited::StopRequested => {
+                interrupt_and_detach(pid);
+                return;
+            }
+        };
+        let info = syscall_info(pid);
+        if let Some(info) = &info {
+            match info.op {
+                libc::PTRACE_SYSCALL_INFO_ENTRY => {
+                    current = Some(unsafe { info.u.entry.nr });
+                }
+                libc::PTRACE_SYSCALL_INFO_EXIT => {
+                    // An exit without the entry we traced — the
+                    // syscall the tracee was interrupted in at
+                    // attach — has no number to name; the restarted
+                    // syscall reports its own entry soon after.
+                    if let Some(nr) = current.take() {
+                        let (sval, is_error) = unsafe { (info.u.exit.sval, info.u.exit.is_error) };
+                        let line = if is_error != 0 {
+                            format!("{} = -{}", syscall_name(nr), -sval)
+                        } else {
+                            format!("{} = {sval:#x}", syscall_name(nr))
+                        };
+                        let mut ring = lines.lock().expect("trace ring");
+                        if ring.len() == RING_LINES {
+                            ring.pop_front();
                         }
+                        ring.push_back(line);
                     }
-                    _ => {}
                 }
+                _ => {}
             }
-            // Resume: step to the next syscall stop. A stop that is not
-            // a syscall stop is a signal-delivery or event stop; real
-            // signals pass through unchanged. SIGTRAP and SIGSTOP
-            // belong to the tracer machinery itself, and event stops
-            // encode their kind in the stop-signal bits — not a
-            // deliverable signal.
-            let resume_sig = if info.op == libc::PTRACE_SYSCALL_INFO_NONE {
-                match libc::WSTOPSIG(status) {
-                    libc::SIGTRAP | libc::SIGSTOP => 0,
-                    sig if sig < 128 => sig,
-                    _ => 0,
-                }
-            } else {
-                0
-            };
-            // Failures here mean the tracee died under us; the next
-            // waitpid says so.
-            unsafe {
-                libc::ptrace(
-                    libc::PTRACE_SYSCALL,
-                    pid,
-                    0,
-                    resume_sig as *mut libc::c_void,
-                );
-            }
-        } else if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
-            break;
         }
-    }
-    // Detach so the tracee runs free again. The stop flag is set when
-    // this runs through Drop; on tracee exit this is a harmless ESRCH.
-    unsafe {
-        libc::ptrace(libc::PTRACE_DETACH, pid, 0, 0);
+        let signal = passed_signal(status, info.as_ref());
+        // Parked right now, so a stop request detaches from this very
+        // stop instead of resuming first.
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            detach(pid, signal);
+            return;
+        }
+        // Resume: step to the next syscall stop. Failures here mean the
+        // tracee died under us; the next waitpid says so.
+        unsafe {
+            libc::ptrace(libc::PTRACE_SYSCALL, pid, 0, signal as *mut libc::c_void);
+        }
     }
 }
 
@@ -477,9 +584,9 @@ mod tests {
 
     /// A child ztop may trace without privileges (yama's default allows
     /// tracing your own children), kept alive for the test's duration.
-    /// Short sleeps in a loop: the tracer sees a syscall boundary every
-    /// few tens of milliseconds, so the test never waits on the one
-    /// long sleep a single `sleep 30` would sit inside.
+    /// Short sleeps in a loop: the shell completes a `wait4` every few
+    /// tens of milliseconds, so the test never waits on the one long
+    /// sleep a single `sleep 30` would sit inside.
     fn traceable_child() -> std::process::Child {
         std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -508,37 +615,162 @@ mod tests {
                 return;
             }
         };
-        // The tracer interrupts the tracee out of its first sleep; the
-        // restarted sleep and every later one report entry and exit
-        // stops, and the exits become the recorded lines. Poll with a
+        // The shell itself never sleeps: it forks `sleep` and waits
+        // for it, so each round reports a completed `wait4` (the
+        // nanosleep happens in the untraced child). Poll with a
         // deadline instead of sleeping a fixed slice — CI machines
         // vary in speed.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         let mut lines: Vec<String> = Vec::new();
         while std::time::Instant::now() < deadline {
-            lines = trace.drain();
-            if lines.iter().any(|line| line.contains("nanosleep")) {
+            lines.extend(trace.drain());
+            if lines.iter().any(|line| line.contains("wait4")) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        if !lines.iter().any(|line| line.contains("nanosleep")) && lines.is_empty() {
-            // A sandbox may also accept the attach and then deliver no
-            // stop at all (observed on CI runners): the tracer reports
-            // nothing rather than hanging, and the feature is verified
-            // where stops flow. Lines that exist but name nothing is a
-            // real bug and still fails below.
-            eprintln!("skipping: the attach worked but no stop arrived within 3s");
-            drop(trace);
-            finish(child);
-            return;
-        }
-        assert!(
-            lines.iter().any(|line| line.contains("nanosleep")),
-            "expected a nanosleep line, got {lines:?}"
-        );
+        // No skip for silence: the "seized but no stop ever arrived"
+        // symptom decision 0040 put down to CI runners was this
+        // tracer's own bug (requests from a thread that had not
+        // attached, and no PTRACE_O_TRACESYSGOOD; decision 0060).
         drop(trace);
         finish(child);
+        assert!(
+            lines.iter().any(|line| line.contains("wait4")),
+            "expected a wait4 line, got {lines:?}"
+        );
+    }
+
+    /// The scheduler state letter of `pid` from `/proc/<pid>/stat`
+    /// (`R`, `S`, `t` for stopped by a tracer, `T` for job-stopped).
+    fn state_of(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_name = stat.rsplit_once(')')?.1;
+        after_name.trim_start().chars().next()
+    }
+
+    /// Regression: the seize used to run on the caller's thread and
+    /// every later ptrace request on the tracer thread. Linux binds a
+    /// tracee to the thread that attached, so the other thread's
+    /// requests failed with ESRCH: no line was ever recorded, and the
+    /// first interrupt left the tracee stopped (`t`) after the trace
+    /// closed, frozen until ztop exited. With the whole session on one
+    /// thread, lines arrive and dropping the handle lets the process
+    /// run again.
+    #[test]
+    fn closing_a_trace_leaves_the_process_running() {
+        let child = traceable_child();
+        let pid = child.id();
+        let finish = |mut child: std::process::Child| {
+            child.kill().expect("kill the traced child");
+            let _ = child.wait();
+        };
+        let trace = match start(pid) {
+            Ok(trace) => trace,
+            Err(error) => {
+                eprintln!("skipping: the environment refuses the attach: {error}");
+                finish(child);
+                return;
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut lines: Vec<String> = Vec::new();
+        while std::time::Instant::now() < deadline && lines.is_empty() {
+            lines = trace.drain();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        drop(trace);
+        if lines.is_empty() {
+            finish(child);
+            panic!("the attach worked but no line arrived");
+        }
+        // Detached: within a second the child must be running or
+        // sleeping in its own loop, never parked in a tracing stop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut state = state_of(pid);
+        while std::time::Instant::now() < deadline && matches!(state, Some('t' | 'T')) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            state = state_of(pid);
+        }
+        finish(child);
+        assert!(
+            !matches!(state, Some('t' | 'T')),
+            "the traced process stayed stopped after the trace closed: {state:?}"
+        );
+    }
+
+    /// A tracee parked inside one long syscall gives the tracer no stop
+    /// to detach from; closing must interrupt it, detach from that
+    /// interrupt stop, and leave the sleep running.
+    #[test]
+    fn closing_a_trace_detaches_a_process_inside_a_long_syscall() {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn the traced child");
+        let pid = child.id();
+        let finish = |mut child: std::process::Child| {
+            child.kill().expect("kill the traced child");
+            let _ = child.wait();
+        };
+        let trace = match start(pid) {
+            Ok(trace) => trace,
+            Err(error) => {
+                eprintln!("skipping: the environment refuses the attach: {error}");
+                finish(child);
+                return;
+            }
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let closed_at = std::time::Instant::now();
+        drop(trace);
+        let close_took = closed_at.elapsed();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut state = state_of(pid);
+        while std::time::Instant::now() < deadline && matches!(state, Some('t' | 'T')) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            state = state_of(pid);
+        }
+        finish(child);
+        assert!(
+            !matches!(state, Some('t' | 'T')),
+            "the sleeping process stayed stopped after the trace closed: {state:?}"
+        );
+        assert!(
+            close_took < std::time::Duration::from_secs(1),
+            "closing took {close_took:?}"
+        );
+    }
+
+    /// The tracer can start from one thread and be dropped from another
+    /// (the TUI owns the handle; nothing pins it to the starting
+    /// thread), and a start right after a drop attaches again.
+    #[test]
+    fn a_process_can_be_traced_twice() {
+        let child = traceable_child();
+        let pid = child.id();
+        let finish = |mut child: std::process::Child| {
+            child.kill().expect("kill the traced child");
+            let _ = child.wait();
+        };
+        let first = match start(pid) {
+            Ok(trace) => trace,
+            Err(error) => {
+                eprintln!("skipping: the environment refuses the attach: {error}");
+                finish(child);
+                return;
+            }
+        };
+        std::thread::spawn(move || drop(first))
+            .join()
+            .expect("drop on another thread");
+        let second = start(pid);
+        finish(child);
+        assert!(
+            second.is_ok(),
+            "the second attach failed: {:?}",
+            second.err()
+        );
     }
 
     #[test]

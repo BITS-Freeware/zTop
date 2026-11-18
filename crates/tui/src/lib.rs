@@ -6093,12 +6093,18 @@ mod tests {
     }
 
     /// With a live tracer (CI Linux: the test's own sleep child), `s`
-    /// opens the overlay, lines arrive, and Esc stops the tracer.
+    /// opens the overlay, lines arrive, and Esc stops the tracer and
+    /// lets the process run again (decision 0060: Esc used to leave it
+    /// frozen in a tracing stop until ztop quit).
     #[cfg(target_os = "linux")]
     #[test]
     fn s_traces_a_child_and_esc_stops() {
-        let child = std::process::Command::new("/bin/sleep")
-            .arg("30")
+        // Short sleeps in a loop: the shell completes a `wait4` per
+        // round, well within the deadline (a single long sleep never
+        // completes, and the nanosleep runs in the untraced child).
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("while :; do sleep 0.05; done")
             .spawn()
             .expect("spawn the traced child");
         let finish = |mut child: std::process::Child| {
@@ -6119,7 +6125,7 @@ mod tests {
             finish(child);
             return;
         }
-        // The child is in nanosleep; poll with a deadline instead of
+        // Poll with a deadline instead of
         // sleeping a fixed slice — CI machines vary in speed.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while std::time::Instant::now() < deadline {
@@ -6130,31 +6136,40 @@ mod tests {
                 .expect("trace")
                 .lines
                 .iter()
-                .any(|line| line.contains("nanosleep"));
+                .any(|line| line.contains("wait4"));
             if has_line {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let lines = ui.trace.as_ref().expect("trace").lines.clone();
-        if lines.is_empty() {
-            // A sandbox may also accept the attach and then deliver no
-            // stop at all (observed on CI runners): the tracer reports
-            // nothing rather than hanging, and the feature is verified
-            // where stops flow. Lines that exist but name nothing is a
-            // real bug and still fails below.
-            eprintln!("skipping: the attach worked but no stop arrived within 3s");
-            handle_key(&mut ui, KeyEvent::from(KeyCode::Esc));
-            finish(child);
-            return;
-        }
-        assert!(
-            lines.iter().any(|line| line.contains("nanosleep")),
-            "expected a nanosleep line, got {lines:?}"
-        );
         handle_key(&mut ui, KeyEvent::from(KeyCode::Esc));
-        assert!(ui.trace.is_none());
+        let closed = ui.trace.is_none();
+        // After Esc the child must not stay parked in a tracing stop.
+        let state = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let rest = stat.rsplit_once(')')?.1.to_string();
+                    rest.trim_start().chars().next()
+                })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut seen = state();
+        while std::time::Instant::now() < deadline && matches!(seen, Some('t' | 'T')) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            seen = state();
+        }
         finish(child);
+        assert!(
+            lines.iter().any(|line| line.contains("wait4")),
+            "expected a wait4 line, got {lines:?}"
+        );
+        assert!(closed);
+        assert!(
+            !matches!(seen, Some('t' | 'T')),
+            "the process stayed stopped after Esc: {seen:?}"
+        );
     }
 
     /// The status hints and help carry the trace key.
