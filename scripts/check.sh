@@ -65,11 +65,32 @@ run packaging sh -c '
     if command -v ruby >/dev/null 2>&1; then
         ruby -c packaging/homebrew/ztop.rb
     fi
-    if grep -q '"--allow-control"' packaging/homebrew/ztop.rb; then
+    if grep -q -- "\"--allow-control\"" packaging/homebrew/ztop.rb; then
         echo "the Homebrew service must not allow control by default"
         exit 1
     fi
+    # The system service for servers: an unprivileged user, TLS, and
+    # no pairing, control or management in the unit or its options.
+    test -f packaging/systemd/system/ztop-agent.service
+    grep -qx "User=ztop" packaging/systemd/system/ztop-agent.service
+    grep -q "^ExecStart=/usr/bin/ztop agent --tls " packaging/systemd/system/ztop-agent.service
+    if grep "^ExecStart=" packaging/systemd/system/ztop-agent.service | grep -qE -- "--allow-control|--allow-manage|--pair"; then
+        echo "the system service must be read-only and never pair"
+        exit 1
+    fi
+    if grep -qE "^ZTOP_AGENT_ARGS=.*--(allow-control|allow-manage|pair)" packaging/systemd/system/ztop-agent.default; then
+        echo "the system service options must not pair or grant rights"
+        exit 1
+    fi
+    grep -q "^u ztop " packaging/systemd/system/ztop.sysusers
+    bash -n packaging/linux/pair-system-agent
+    test -x packaging/linux/pair-system-agent
     test -f packaging/man/ztop.1
+    # The Linux package: the one-line installer is plain sh, and the
+    # apt repository the package adds is the one the workflow publishes.
+    sh -n packaging/linux/install.sh
+    grep -q "^URIs: https://downloads.bristleconeit.com/ztop/apt$" packaging/linux/ztop.sources
+    grep -q "BEGIN PGP PUBLIC KEY BLOCK" packaging/linux/ztop-archive-keyring.asc
     if command -v plutil >/dev/null 2>&1; then
         plutil -lint packaging/launchd/com.ztop.agent.plist
     fi

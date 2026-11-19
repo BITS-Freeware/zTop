@@ -1,0 +1,45 @@
+zTop on a server
+================
+
+The package carries two agents. The user service (systemctl --user) serves one
+person's session on a desktop. The system service, ztop-agent.service, serves a
+machine nobody is logged in to, for a hub or the zTop app on another machine.
+
+The system service is off until you turn it on. It runs as the unprivileged
+ztop user, with TLS, and keeps its certificate and the hashes of its tokens in
+/var/lib/ztop. Clients pin its certificate and send a token; it never accepts
+signals, renice or token management, and it never advertises itself.
+
+1. Choose the address. The agent serves 127.0.0.1 unless /etc/default/ztop-agent
+   says otherwise. Bind the address of a private network on this machine, such
+   as its Tailscale or WireGuard address, never a public one:
+
+       ZTOP_AGENT_ARGS="--bind 100.64.0.10"
+
+   Allow the agent's port (7100) only from the machines that should read it,
+   with the private network's access rules or a firewall.
+
+2. Pair the client, once per client:
+
+       sudo /usr/lib/ztop/pair-system-agent
+
+   It prints {"pin":"SHA256:...","token":"..."}. Give the pin and the token to
+   the client, for example as one entry of a hub's agents file:
+
+       {"name": "web-1", "target": "100.64.0.10:7100",
+        "pin": "SHA256:...", "token": "..."}
+
+   The pairing code never reaches the journal or the network: the helper pairs
+   over loopback and prints only the result.
+
+3. Turn the agent on:
+
+       sudo systemctl enable --now ztop-agent
+       journalctl -u ztop-agent
+
+Upgrades leave a running agent on the old binary until it restarts
+(sudo systemctl restart ztop-agent). Removing the package stops and disables
+it; purging also deletes /var/lib/ztop, so every client has to pair again.
+
+To revoke every client, stop the agent, delete /var/lib/ztop/ztop/tokens.json
+and start it again.

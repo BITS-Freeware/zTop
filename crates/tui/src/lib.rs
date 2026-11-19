@@ -4277,7 +4277,11 @@ mod tests {
     fn renders_the_header_and_table_at_80x24() {
         let ui = ui_with(Some(sample()), None);
         let rows = render(&ui, 80, 24);
-        assert!(rows[0].contains("zTop 0.1.0"), "{:?}", rows[0]);
+        assert!(
+            rows[0].contains(concat!("zTop ", env!("CARGO_PKG_VERSION"))),
+            "{:?}",
+            rows[0]
+        );
         assert!(rows[0].contains("host-a"), "{:?}", rows[0]);
         assert!(rows[0].contains("up 02:00:54"), "{:?}", rows[0]);
         assert!(rows[0].contains("12 procs"), "{:?}", rows[0]);

@@ -9,9 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- The syscall tracer releases the traced process on close, and every ptrace request comes from one thread.
-- Control refuses pid 0, group pids and signals outside the catalog; listing and revoking tokens needs the new `manage` right; pairing codes are eight symbols, burned by five wrong guesses and spaced a second apart.
-- The agent and the hub keep serving through failed accepts, with deadlines for the TLS handshake, the request head and the answer, and a connection cap.
 - The protocol client parses responses as bytes (a crafted response could panic it), reads at most 32 MiB, and gives each fetch one overall deadline.
 - Agent history answers cover at most an hour, and at most two are built at once.
 - The TLS key, the state directory and the hub's history database are private (0600 and 0700) from the moment they exist; the tokens file is written atomically, and a corrupt one is moved aside loudly instead of silently disabling persistence.
@@ -19,9 +16,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Hub retention deletes rows past a day, history no longer stores process lists, and windows, pruning and the latest sample go by the hub's own clock.
-- The live Linux collector reads command lines, finds mounted disks, survives offline CPUs and reads only the sensor and battery files it uses.
+- The hub's windows, pruning and latest sample go by the hub's own clock.
+- The live Linux collector reads only the sensor and battery files it uses.
 - A failed mDNS start no longer crashes the agent.
+
+## [0.1.2] - 2026-11-19
+
+### Added
+
+- **Servers**: the `.deb` ships a system service, `ztop-agent.service`, off until enabled. It runs the agent as the unprivileged `ztop` user with TLS, keeps its certificate and tokens in `/var/lib/ztop`, binds the address in `/etc/default/ztop-agent` (loopback by default), starts after a private network such as Tailscale, and never pairs or grants control. `/usr/lib/ztop/pair-system-agent` pairs one read-only client over loopback (decision 0066).
+
+## [0.1.1] - 2026-11-19
+
+### Added
+
+- **apt**: a one-line installer for Debian, Ubuntu and Raspberry Pi OS (`curl -fsSL https://downloads.bristleconeit.com/ztop/install.sh | sh`) and a signed apt repository, so `sudo apt upgrade` keeps ztop current (decision 0065).
+
+### Security
+
+- Control refuses pid 0, process-group pids and signals outside the catalog; listing and revoking tokens needs the new `manage` right (`--allow-manage`); pairing codes are eight symbols, burned by five wrong guesses and spaced a second apart; the launchd log moved out of /tmp (decision 0061).
+- One accept loop with handshake and header deadlines and a connection cap serves the agent and the hub, so a failed accept or a stalled peer no longer stops or ties up the server (decision 0064).
+
+### Fixed
+
+- The syscall tracer sends every request from its own thread, so closing a trace detaches and releases the process (decision 0060).
+- The hub prunes history older than 24 hours, stores it without process lists and caps a window at one hour (decision 0062).
+- The live Linux collector reads command lines, finds mounted disks by their diskstats name and keeps core numbers across offline cores (decision 0063).
+
+### Changed
+
+- The `.deb` installs into `/usr` instead of `/usr/local`, is built natively on Debian 12 for amd64 and arm64, and no longer creates a `ztop` system user or enables the agent at install; turn the agent on with `systemctl --user enable --now ztop-agent`.
 
 ## [0.1.0] - 2026-11-18
 

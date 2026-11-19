@@ -381,10 +381,15 @@ The zTop app for iPad and Mac is developed separately and tracks its own items. 
 - [x] Homebrew formula with a `brew services` agent
   (`packaging/homebrew/ztop.rb`: builds the tagged source, `service do`
   block runs a read-only agent — TLS + pairing, no `--allow-control`).
-- [x] `.deb` for amd64 and arm64 with a systemd unit and a dedicated user
-  (`packaging/build-deb.sh` packages `lib/systemd/user/ztop-agent.service`;
-  postinst creates the `ztop` system user, best-effort).
+- [x] `.deb` for amd64 and arm64 with a systemd user unit
+  (`packaging/build-deb.sh` packages `/usr/bin/ztop` and
+  `/usr/lib/systemd/user/ztop-agent.service`, built natively on Debian 12
+  for each architecture; the package adds zTop's signed apt repository,
+  decision 0065. The `ztop` system user of 0.1.0 is gone: the agent is a
+  per-person user service).
 - [x] Install, upgrade and uninstall tested in CI on both
   (`.github/workflows/packaging.yml`: the `.deb` matrix amd64/arm64 and the
   Homebrew job each install, upgrade, pair a test client with the installed
-  agent, and uninstall; green on 0e54b69).
+  agent, and uninstall; green on 0e54b69. Since decision 0065 the `.deb`
+  jobs install with the one-line installer and upgrade through a signed
+  apt repository, `packaging/check-deb.sh`).
