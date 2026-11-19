@@ -1409,6 +1409,7 @@ pub fn run(
     config: Config,
     flags: RunFlags,
 ) -> io::Result<()> {
+    restore_on_panic();
     enable_raw_mode()?;
     let result = run_inner(collector, pids, config, flags);
     restore()?;
@@ -1446,6 +1447,21 @@ fn run_inner(
     let result = event_loop(&mut terminal, collector, pids, config, flags);
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     result
+}
+
+/// Put the terminal back before a panic message prints. Without this a
+/// panic anywhere under [`run`] (audit M1 found one in the protocol
+/// client) left the shell in raw mode on the alternate screen. The hook
+/// wraps whatever hook was installed, once per process.
+fn restore_on_panic() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = restore();
+            previous(info);
+        }));
+    });
 }
 
 fn restore() -> io::Result<()> {
