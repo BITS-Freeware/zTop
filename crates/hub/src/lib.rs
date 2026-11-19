@@ -632,7 +632,9 @@ pub async fn serve(
         .await
         .map_err(|error| std::io::Error::other(format!("opening the history failed: {error}")))?;
     let mut auth = match ztop_core::paths::state_dir() {
-        Some(dir) => auth::Auth::at(dir.join("hub").join("tokens.json")).unwrap_or_default(),
+        Some(dir) => {
+            auth::Auth::at(dir.join("hub").join("tokens.json")).map_err(std::io::Error::other)?
+        }
         None => auth::Auth::in_memory(),
     };
     if pair {
