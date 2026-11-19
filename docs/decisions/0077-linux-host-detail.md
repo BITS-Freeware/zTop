@@ -1,4 +1,4 @@
-# Decision 0066: the Linux app's host detail page
+# Decision 0077: the Linux app's host detail page
 
 Date: 2026-11-19
 Status: accepted
@@ -44,3 +44,5 @@ a snapshot.
   machine with sensors.
 - The published screenshots are cropped to leave out the recording
   machine's mount list.
+
+- This record was first numbered 0066, which the system agent for servers also took; it was renumbered 0077.

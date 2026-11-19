@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Maintainer: Bristlecone IT Services
+#
+# zTop for Linux, the GTK4 desktop app in desktop/, for Arch Linux and Arch-based systems such
+# as Omarchy (decision 0076). Build it from a checkout of this repository with
+# packaging/arch/makepkg-local.sh, or from a release tag that has desktop/ with makepkg.
+pkgname=ztop-desktop
+pkgver=0.1.2
+pkgrel=1
+pkgdesc='Desktop app that watches a fleet of Macs and Linux machines through zTop agents and hubs'
+arch=('x86_64' 'aarch64')
+url='https://github.com/BITS-Freeware/zTop'
+license=('MIT OR Apache-2.0')
+depends=('gtk4' 'libadwaita' 'libsecret' 'glib2' 'cairo' 'pango' 'graphene' 'glibc' 'libgcc')
+makedepends=('cargo')
+optdepends=('gnome-keyring: keep pairing tokens in the desktop keyring instead of files'
+            'ztop-monitor: run an agent or a hub on this machine')
+options=('!lto')
+source=("zTop-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# A release tarball's sum is filled in by packaging/arch/prepare-aur.sh (updpkgsums).
+sha256sums=('SKIP')
+
+prepare() {
+  cd "zTop-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --manifest-path desktop/Cargo.toml --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "zTop-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --manifest-path desktop/Cargo.toml -p ztop-desktop
+}
+
+check() {
+  cd "zTop-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # The live-agent and keyring tests need a ztop binary and a keyring session; desktop/scripts/
+  # check.sh runs those. Here, the tests that need neither.
+  cargo test --frozen --manifest-path desktop/Cargo.toml
+}
+
+package() {
+  cd "zTop-$pkgver"
+  install -Dm755 target/release/ztop-desktop "$pkgdir/usr/bin/ztop-desktop"
+  install -Dm644 desktop/packaging/dev.ztop.Desktop.desktop \
+    "$pkgdir/usr/share/applications/dev.ztop.Desktop.desktop"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+  install -Dm644 desktop/README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

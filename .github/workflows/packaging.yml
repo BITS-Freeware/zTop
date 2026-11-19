@@ -13,69 +13,55 @@ on:
     paths:
       - 'packaging/**'
       - '.github/workflows/packaging.yml'
+      - 'scripts/measure-agent.sh'
+  # A release: build the packages from main to publish with Publish Linux Packages.
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   deb:
+    # Each architecture builds natively on Debian 12 (bookworm), the oldest distribution the
+    # package supports, so dpkg-shlibdeps reads the real binary and the package runs on
+    # Debian 12 and 13, Raspberry Pi OS and Ubuntu 24.04 and later. The packages are the
+    # artifacts Publish Linux Packages publishes.
     name: .deb ${{ matrix.arch }} (Debian/Ubuntu)
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    container: debian:bookworm
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
-            target: x86_64-unknown-linux-gnu
-            cross: false
-            install_test: true
+            runner: ubuntu-latest
           - arch: arm64
-            target: aarch64-unknown-linux-gnu
-            cross: true
-            install_test: false
+            runner: ubuntu-24.04-arm
     steps:
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates build-essential dpkg-dev apt-utils gnupg procps
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0 # the build number is the commit count
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-          targets: ${{ matrix.target }}
-      - name: Install cross toolchain
-        if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
       - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
         with:
-          key: ${{ matrix.target }}
-      - name: Set cross linker
-        if: matrix.cross
+          key: deb-${{ matrix.arch }}
+      - name: Build the package
         run: |
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
-      - name: Build .deb
-        run: |
-          ./packaging/build-deb.sh 0.1.0 ${{ matrix.arch }}
-          ls -la *.deb
-      - name: Install .deb
-        if: matrix.install_test
-        run: |
-          sudo dpkg -i ztop_0.1.0_amd64.deb
-          which ztop
-          ztop --version
-      - name: Upgrade .deb
-        if: matrix.install_test
-        run: |
-          # The upgrade path: the same tree packaged as 0.1.1 over the
-          # installed 0.1.0 exercises dpkg's upgrade (postinst re-run).
-          ./packaging/build-deb.sh 0.1.1 ${{ matrix.arch }}
-          sudo dpkg -i ztop_0.1.1_amd64.deb
-          dpkg-query -W -f='${Version}\n' ztop | grep -qx 0.1.1
-          ztop --version
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/build-deb.sh --out dist
+          dpkg-deb -I dist/ztop_*.deb
+      - name: Install it with the one-line installer, then upgrade it through a signed apt repository
+        run: packaging/check-deb.sh dist/ztop_*_${{ matrix.arch }}.deb
+      - name: Install it again for the agent checks
+        run: DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ./dist/ztop_*_${{ matrix.arch }}.deb
       - name: Measure the agent against the budget
-        if: matrix.install_test
         run: scripts/measure-agent.sh 30
       - name: Pair a test client with the installed agent
-        if: matrix.install_test
         run: |
           ztop agent --tls --pair --no-advertise --port 7103 >agent.log 2>&1 &
           pid=$!
@@ -90,11 +76,16 @@ jobs:
           ztop connect --tls --pin "$pin" --code "$code" --once 127.0.0.1:7103
           kill "$pid"
           wait "$pid" 2>/dev/null || true
-      - name: Uninstall .deb
-        if: matrix.install_test
+      - name: Remove it
         run: |
-          sudo dpkg -r ztop
-          which ztop || echo "ztop removed successfully"
+          DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq ztop
+          ! command -v ztop
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ztop-linux-${{ matrix.arch }}
+          path: dist/ztop_*
+          if-no-files-found: error
+          retention-days: 30
 
   homebrew:
     name: Homebrew (macOS)
@@ -109,7 +100,7 @@ jobs:
         run: ruby -c packaging/homebrew/ztop.rb
       - name: Install the formula from this checkout
         run: |
-          # The real formula builds from the v0.1.0 git tag; the tag does
+          # The real formula builds from the v0.1.2 git tag; the tag does
           # not exist until release, so the CI check points the same
           # formula at this checkout with a file:// git URL (decision
           # 0058). The git download strategy defaults to a "master"
@@ -123,11 +114,11 @@ jobs:
           git -C "$repo" branch -f ztop-ci-build HEAD
           tap="$RUNNER_TEMP/ztop-tap"
           mkdir -p "$tap/Formula"
-          sed 's|url "https://github.com/BITS-Freeware/zTop.git", tag: "v0.1.0"|url "file://'"$repo"'", using: :git, branch: "ztop-ci-build"|' \
+          sed 's|url "https://github.com/BITS-Freeware/zTop.git", tag: "v0.1.2"|url "file://'"$repo"'", using: :git, branch: "ztop-ci-build"|' \
             packaging/homebrew/ztop.rb > "$tap/Formula/ztop.rb"
           git -C "$tap" init -q
           git -C "$tap" add Formula
-          git -C "$tap" -c user.name=ci -c user.email=ci@ztop.dev commit -qm "ztop 0.1.0"
+          git -C "$tap" -c user.name=ci -c user.email=ci@ztop.dev commit -qm "ztop 0.1.2"
           brew tap local/ztop "$tap"
           # A local tap must be trusted before its formulae load (older
           # brew versions have no such requirement; tolerate both).
@@ -153,10 +144,10 @@ jobs:
           # `brew tap` clones the tap into Homebrew's own tree, so the
           # version bump must land in the installed clone, not in the
           # source directory brew no longer reads; a bump only in the
-          # source leaves the clone at 0.1.0, the upgrade is a no-op,
+          # source leaves the clone at 0.1.2, the upgrade is a no-op,
           # and the version check below fails.
           tap_installed="$(brew --repository)/Library/Taps/local/homebrew-ztop"
-          sed -i '' 's/version "0.1.0"/version "0.1.1"/' "$tap_installed/Formula/ztop.rb"
+          sed -i '' 's/version "0.1.2"/version "0.1.3"/' "$tap_installed/Formula/ztop.rb"
           if brew upgrade --build-from-source local/ztop/ztop \
               > "$RUNNER_TEMP/brew-upgrade.log" 2>&1
           then
@@ -169,7 +160,7 @@ jobs:
             echo "::error title=brew upgrade ztop::${msg}"
             exit 1
           fi
-          brew list --versions ztop | grep -q 0.1.1
+          brew list --versions ztop | grep -q 0.1.3
       - name: Start the agent as a service and pair a test client
         run: |
           brew services start ztop
