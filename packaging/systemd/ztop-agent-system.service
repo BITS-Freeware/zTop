@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# System service for the .deb package: the agent runs as the dedicated,
+# unprivileged `ztop` user the package creates (DESIGN.md), with its
+# state in /var/lib/ztop. The package installs this file as
+# /lib/systemd/system/ztop-agent.service. For a per-user install without
+# the package, use ztop-agent.service instead.
+#
+# The service is read-only: it serves TLS and pairing but does not pass
+# --allow-control. The pairing code and TLS fingerprint go to the
+# journal: read them with `sudo journalctl -u ztop-agent`, and restart
+# the service for a fresh code.
+
+[Unit]
+Description=zTop agent: local metrics over the zTop protocol
+Documentation=man:ztop(1) https://github.com/BITS-Freeware/zTop
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/ztop agent --tls --pair
+User=ztop
+Group=ztop
+# The state directory is ztop_core::paths::state_dir():
+# $XDG_CONFIG_HOME/ztop, so /var/lib/ztop, created 0700 for the user.
+StateDirectory=ztop
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/ztop XDG_CONFIG_HOME=/var/lib
+UMask=0077
+Restart=on-failure
+RestartSec=2
+
+# The agent reads /proc and /sys and serves one port; it needs nothing
+# else. Devices stay visible so GPU metrics (NVML, AMD sysfs) still work.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

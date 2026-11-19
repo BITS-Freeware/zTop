@@ -113,6 +113,12 @@ client for scripts and CI pairing checks.
 .BI ~/.config/ztop/
 State directory (tokens, hub history). Honors
 .BR $XDG_CONFIG_HOME .
+.TP
+.B /var/lib/ztop/
+State directory of the agent installed by the .deb package, which runs
+as the
+.B ztop
+system user.
 .SH EXAMPLES
 Run the agent with TLS and pairing:
 .PP
@@ -126,4 +132,6 @@ Pair a client and open the TUI:
 $ ztop connect \-\-tls \-\-pin SHA256:... \-\-code ABCDEF 127.0.0.1:7100
 .fi
 .SH AUTHOR
-zTop Maintainers <maintainers@ztop.dev>
+The zTop maintainers. Report bugs at
+.UR https://github.com/BITS-Freeware/zTop/issues
+.UE .

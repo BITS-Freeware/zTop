@@ -90,11 +90,27 @@ jobs:
           ztop connect --tls --pin "$pin" --code "$code" --once 127.0.0.1:7103
           kill "$pid"
           wait "$pid" 2>/dev/null || true
-      - name: Uninstall .deb
+      - name: The package runs the agent as the ztop user
+        if: matrix.install_test
+        run: |
+          getent passwd ztop
+          test "$(stat -c %a /var/lib/ztop)" = 700
+          systemctl cat ztop-agent.service | grep -qx 'User=ztop'
+          # The service starts, as ztop, and prints its fingerprint.
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if sudo journalctl -u ztop-agent --no-pager | grep -q 'TLS fingerprint'; then break; fi
+            sleep 1
+          done
+          systemctl is-active ztop-agent.service
+          test "$(ps -o user= -p "$(systemctl show -p MainPID --value ztop-agent)")" = ztop
+      - name: Uninstall and purge .deb
         if: matrix.install_test
         run: |
           sudo dpkg -r ztop
-          which ztop || echo "ztop removed successfully"
+          if command -v ztop; then echo "ztop is still installed" >&2; exit 1; fi
+          sudo dpkg -P ztop
+          if getent passwd ztop; then echo "purge left the ztop user" >&2; exit 1; fi
+          test ! -e /var/lib/ztop
 
   homebrew:
     name: Homebrew (macOS)

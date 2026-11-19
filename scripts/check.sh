@@ -60,6 +60,18 @@ run packaging sh -c '
         echo "the systemd service must not allow control by default"
         exit 1
     fi
+    # The .deb system unit: read-only, and run as the ztop user.
+    test -f packaging/systemd/ztop-agent-system.service
+    if grep -q "^ExecStart=.*--allow-control" packaging/systemd/ztop-agent-system.service; then
+        echo "the .deb system service must not allow control by default"
+        exit 1
+    fi
+    grep -qx "User=ztop" packaging/systemd/ztop-agent-system.service
+    # The package installs under /usr, never /usr/local.
+    if grep -q "PKG_DIR/usr/local" packaging/build-deb.sh; then
+        echo "the .deb must not install into /usr/local"
+        exit 1
+    fi
     # The Homebrew formula: syntax where ruby exists, and the shipped
     # service is read-only.
     if command -v ruby >/dev/null 2>&1; then
