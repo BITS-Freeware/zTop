@@ -64,12 +64,18 @@ fn temp_home(tag: &str) -> PathBuf {
 /// Starts `ztop agent` and waits for its startup lines: with `tls`,
 /// the pairing code and the fingerprint; plain, the first line.
 fn start_agent(bin: &PathBuf, tls: bool) -> Agent {
+    start_agent_with(bin, tls, &[])
+}
+
+/// [`start_agent`] with extra agent flags, such as `--allow-control`.
+fn start_agent_with(bin: &PathBuf, tls: bool, extra: &[&str]) -> Agent {
     let home = temp_home("agent");
     let port = random_port();
     let mut args = vec!["agent".to_string(), "--port".into(), port.to_string()];
     if tls {
         args.extend(["--tls", "--pair", "--no-advertise"].map(String::from));
     }
+    args.extend(extra.iter().map(|a| a.to_string()));
     let mut child = Command::new(bin)
         .args(&args)
         .env_clear()
@@ -248,4 +254,70 @@ fn the_detail_page_history_comes_from_the_agent_in_time_order() {
         agent::history(&record, None, 60).unwrap_err(),
         ReadError::NeedsPairing
     );
+}
+
+/// The state letter `/proc/<pid>/stat` reports: `T` stopped, `S`
+/// sleeping, `Z` exited but not yet reaped.
+fn proc_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?.1.chars().next()
+}
+
+fn wait_for_state(pid: u32, wanted: char) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if proc_state(pid) == Some(wanted) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn stop_cont_and_term_reach_a_process_by_the_agents_numbers() {
+    let Some(bin) = agent_binary() else { return };
+
+    // Without --allow-control the agent refuses in its own words.
+    let plain = start_agent(&bin, true);
+    let plain_record = HostRecord::new("host-a", "127.0.0.1", plain.port, &plain.pin);
+    let plain_token = agent::pair(&plain_record, &plain.code).expect("pairing");
+    let refused = agent::send_signal(&plain_record, Some(plain_token), &[1], 0);
+    let why = refused[0].1.clone().unwrap_err();
+    assert!(why.contains("allow"), "unexpected refusal: {why}");
+
+    let agent = start_agent_with(&bin, true, &["--allow-control"]);
+    let record = HostRecord::new("host-b", "127.0.0.1", agent.port, &agent.pin);
+    let token = agent::pair(&record, &agent.code).expect("pairing");
+    read_soon(&record, Some(token.clone())).expect("a paired read");
+
+    let catalog = agent::signal_catalog(&record, Some(token.clone())).expect("the catalog");
+    let number = |name: &str| {
+        catalog
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} is not in the catalog"))
+            .number
+    };
+    assert_eq!(catalog[0].name, "TERM", "the menu starts with TERM");
+
+    let mut child = Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .expect("spawn sleep");
+    let pid = child.id();
+    let send = |name: &str| {
+        let results = agent::send_signal(&record, Some(token.clone()), &[pid], number(name));
+        assert_eq!(results.len(), 1);
+        results[0].1.clone()
+    };
+
+    send("STOP").expect("STOP");
+    assert!(wait_for_state(pid, 'T'), "STOP did not stop the process");
+    send("CONT").expect("CONT");
+    assert!(wait_for_state(pid, 'S'), "CONT did not resume the process");
+    send("TERM").expect("TERM");
+    let status = child.wait().expect("the child ends");
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(status.signal(), Some(15), "TERM ended the process");
 }

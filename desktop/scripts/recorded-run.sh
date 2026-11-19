@@ -15,6 +15,8 @@
 # the check also expects the CPU, memory and load sections and the
 # per-core bars; SNAPSHOT_AFTER (default 8) sets how long it runs, and
 # SIZE (default 1000x1500) the window, so the page fits one picture.
+# SEARCH prefills the process search and SCROLL=processes scrolls the
+# page to the process table.
 # Needs xvfb-run, dbus-run-session and gnome-keyring-daemon; the app
 # ztop and the app built (cargo build at the root and in desktop/).
 set -eu
@@ -53,7 +55,7 @@ else
     AFTER="${SNAPSHOT_AFTER:-8}"
 fi
 DETAIL_ENV=""
-[ -n "${DETAIL:-}" ] && DETAIL_ENV="ZTOP_DESKTOP_DETAIL=$DETAIL ZTOP_DESKTOP_SIZE=${SIZE:-1000x1500}"
+[ -n "${DETAIL:-}" ] && DETAIL_ENV="ZTOP_DESKTOP_DETAIL=$DETAIL ZTOP_DESKTOP_SIZE=${SIZE:-1000x1500} ZTOP_DESKTOP_SEARCH=${SEARCH:-} ZTOP_DESKTOP_SCROLL=${SCROLL:-}"
 
 mkdir -p "$WORK/home/.cache"
 cat >"$WORK/session.sh" <<INNER
@@ -69,7 +71,7 @@ grep -q "^ztop-desktop: tokens in the desktop keyring$" "$WORK/report"
 grep -q "^ztop-desktop: host host-a live$" "$WORK/report"
 grep -q "^ztop-desktop: host host-b $EXPECT_B$" "$WORK/report"
 if [ -n "${DETAIL:-}" ]; then
-    for section in CPU Memory "Load average" "per-core bars"; do
+    for section in CPU Memory "Load average" "per-core bars" Processes; do
         grep -q "^ztop-desktop: detail shows $section$" "$WORK/report"
     done
 fi

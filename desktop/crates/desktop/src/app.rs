@@ -354,7 +354,8 @@ impl Fleet {
         let Some(record) = self.records().into_iter().find(|r| r.id == id) else {
             return;
         };
-        let detail = Detail::new(&record);
+        let token = self.tokens.borrow().get(id).cloned();
+        let detail = Detail::new(&record, token.clone(), &self.toasts);
         {
             let fleet = Rc::downgrade(self);
             let id = record.id.clone();
@@ -374,7 +375,6 @@ impl Fleet {
         }
         *self.detail.borrow_mut() = Some(detail.clone());
         self.nav.push(&detail.page);
-        let token = self.tokens.borrow().get(id).cloned();
         glib::spawn_future_local(async move {
             let seconds = ztop_desktop_core::history::WINDOW_SECONDS;
             let result = gio::spawn_blocking(move || agent::history(&record, token, seconds))

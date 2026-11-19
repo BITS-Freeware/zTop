@@ -275,6 +275,29 @@ impl RemoteCollector {
     }
 }
 
+impl RemoteCollector {
+    /// `GET /v1/control`: the agent's own signal catalog, as
+    /// `(name, number)` pairs. Signals are sent by these numbers, never
+    /// the client's: macOS and Linux number STOP, TSTP and CONT
+    /// differently.
+    pub fn signal_catalog(&self) -> Result<Vec<(String, i32)>, CollectError> {
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            name: String,
+            number: i32,
+        }
+        let mut envelope = self.fetch_envelope(CONTROL_PATH)?;
+        let entries: Vec<Entry> =
+            serde_json::from_value(envelope["signals"].take()).map_err(|_| {
+                CollectError::Unavailable {
+                    origin: "agent",
+                    what: "an understandable signal catalog",
+                }
+            })?;
+        Ok(entries.into_iter().map(|e| (e.name, e.number)).collect())
+    }
+}
+
 impl Collector for RemoteCollector {
     fn sample(&mut self) -> Result<Sample, CollectError> {
         let mut envelope = self.fetch_envelope(SNAPSHOT_PATH)?;

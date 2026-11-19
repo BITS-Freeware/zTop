@@ -47,6 +47,38 @@ pub fn history(
         .map_err(read_error)
 }
 
+/// Reads the target's signal catalog, in menu order.
+pub fn signal_catalog(
+    record: &HostRecord,
+    token: Option<String>,
+) -> Result<Vec<crate::processes::Signal>, ReadError> {
+    let catalog = collector(record, token)?
+        .signal_catalog()
+        .map_err(read_error)?;
+    Ok(crate::processes::menu_order(catalog))
+}
+
+/// Sends `signal` (a number from the target's own catalog) to `pids`;
+/// one result per pid, in the agent's words when it refuses.
+pub fn send_signal(
+    record: &HostRecord,
+    token: Option<String>,
+    pids: &[u32],
+    signal: i32,
+) -> Vec<(u32, Result<(), String>)> {
+    let plan = ztop_core::control::Plan {
+        pids: pids.to_vec(),
+        action: ztop_core::control::Control::Signal(signal),
+    };
+    match collector(record, token) {
+        Ok(mut collector) => collector.execute_plan(&plan),
+        Err(why) => pids
+            .iter()
+            .map(|pid| (*pid, Err(why.to_string())))
+            .collect(),
+    }
+}
+
 fn collector(record: &HostRecord, token: Option<String>) -> Result<RemoteCollector, ReadError> {
     Ok(if record.pin.is_empty() {
         RemoteCollector::new(record.target())

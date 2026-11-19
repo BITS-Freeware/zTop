@@ -12,6 +12,8 @@ use ztop_desktop_core::history::{self, Line, WINDOW_SECONDS};
 use ztop_desktop_core::summary::uptime_text;
 use ztop_desktop_core::{History, HostRecord};
 
+use crate::processes::ProcessTable;
+
 /// Line colours, readable on light and dark backgrounds (the GNOME
 /// palette's 3 shades).
 const PALETTE: [(f64, f64, f64); 6] = [
@@ -265,6 +267,7 @@ fn draw_cores(area: &gtk::DrawingArea, cr: &cairo::Context, width: i32, height: 
 pub struct Detail {
     pub id: String,
     pub page: adw::NavigationPage,
+    scroller: gtk::ScrolledWindow,
     title: adw::WindowTitle,
     status: gtk::Label,
     cores: gtk::DrawingArea,
@@ -279,10 +282,11 @@ pub struct Detail {
     temperatures: Chart,
     fans: Chart,
     history: RefCell<History>,
+    processes: Rc<ProcessTable>,
 }
 
 impl Detail {
-    pub fn new(record: &HostRecord) -> Rc<Self> {
+    pub fn new(record: &HostRecord, token: Option<String>, toasts: &adw::ToastOverlay) -> Rc<Self> {
         let title = adw::WindowTitle::new(&record.name, &record.target());
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&title));
@@ -339,10 +343,12 @@ impl Detail {
             .margin_end(18)
             .build();
         column.append(&status);
+        let processes = ProcessTable::new(record, token, toasts);
         for chart in [&cpu, &memory, &load, &disks, &network, &temperatures, &fans] {
             chart.group.set_visible(false);
             column.append(&chart.group);
         }
+        column.append(&processes.group);
         let clamp = adw::Clamp::builder()
             .maximum_size(960)
             .child(&column)
@@ -364,6 +370,7 @@ impl Detail {
         Rc::new(Self {
             id: record.id.clone(),
             page,
+            scroller: scroller.clone(),
             title,
             status,
             cores,
@@ -378,6 +385,7 @@ impl Detail {
             temperatures,
             fans,
             history: RefCell::default(),
+            processes,
         })
     }
 
@@ -398,8 +406,27 @@ impl Detail {
 
     /// One new sample from the fleet poll.
     pub fn push(&self, sample: ztop_core::model::Sample) {
+        // The history drops process lists; the table takes this one first.
+        self.processes.show(&sample.processes);
         self.history.borrow_mut().push(sample);
         self.refresh();
+    }
+
+    /// Scrolls the page so the process table is at the top, for a
+    /// recorded run of it.
+    pub fn scroll_to_processes(&self) {
+        let Some(content) = self.scroller.child() else {
+            return;
+        };
+        if let Some(point) = self
+            .processes
+            .group
+            .compute_point(&content, &gtk::graphene::Point::new(0.0, 0.0))
+        {
+            self.scroller
+                .vadjustment()
+                .set_value(f64::from(point.y()) - 12.0);
+        }
     }
 
     /// The number of samples held, for the recorded-run report.
@@ -422,6 +449,9 @@ impl Detail {
         .filter(|c| c.group.is_visible())
         .map(|c| c.group.title().to_string())
         .collect();
+        if self.processes.group.is_visible() {
+            names.push("Processes".into());
+        }
         if self.cores.is_visible() {
             names.push("per-core bars".into());
         }

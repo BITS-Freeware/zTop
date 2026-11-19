@@ -11,6 +11,10 @@
 //! - `ZTOP_DESKTOP_DETAIL=<name>`: open that host's detail page once
 //!   it has a live sample; the snapshot report then names the sections
 //!   the page shows and how many samples it holds.
+//! - `ZTOP_DESKTOP_SEARCH=<text>`: start the process table's search
+//!   with this text.
+//! - `ZTOP_DESKTOP_SCROLL=processes`: once the detail page is open,
+//!   scroll it to the process table.
 //! - `ZTOP_DESKTOP_SNAPSHOT=<file.png>`: after
 //!   `ZTOP_DESKTOP_SNAPSHOT_AFTER` seconds (default 8), draw the window
 //!   into that PNG and quit. The app's own render, so no screen capture
@@ -88,6 +92,15 @@ fn open_detail_when_live(fleet: &Rc<Fleet>, name: String) {
         }
         if let Some(record) = fleet.records().into_iter().find(|r| r.name == name) {
             fleet.open_detail(&record.id);
+            if std::env::var("ZTOP_DESKTOP_SCROLL").as_deref() == Ok("processes") {
+                // After the history and the first layout have landed.
+                let fleet = Rc::downgrade(&fleet);
+                glib::timeout_add_local_once(Duration::from_secs(3), move || {
+                    if let Some(detail) = fleet.upgrade().and_then(|f| f.detail.borrow().clone()) {
+                        detail.scroll_to_processes();
+                    }
+                });
+            }
         }
         glib::ControlFlow::Break
     });

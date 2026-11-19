@@ -9,6 +9,7 @@ pub mod agent;
 pub mod freshness;
 pub mod history;
 pub mod hosts;
+pub mod processes;
 pub mod summary;
 pub mod tokens;
 

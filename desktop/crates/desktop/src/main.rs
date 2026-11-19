@@ -8,6 +8,7 @@ mod card;
 mod detail;
 mod dialogs;
 mod hooks;
+mod processes;
 mod secret;
 
 use adw::prelude::*;

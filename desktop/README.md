@@ -30,7 +30,7 @@ on a host's detail page.
 ## Layout
 
 - `crates/desktop-core`: saved hosts, token store, live state, card
-  figures, a host's recent history and the series its charts draw, and
-  agent calls, through this repository's `ztop-core` client.
+  figures, a host's recent history and the series its charts draw, the
+  process table's search, sort and signal menu, and agent calls, through this repository's `ztop-core` client.
 - `crates/desktop`: the window, the dialogs, the detail page and the
   keyring store.

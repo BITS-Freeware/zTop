@@ -2,14 +2,16 @@
 
 Updated after every working session.
 
-- **Current milestone:** zTop for Linux, L2 (host detail), after the 0.1.0 release.
-- **Last done:** zTop for Linux L2, the host detail page (decision 0066), recorded against a live agent.
-- **Next step:** a recorded detail run on a machine with temperature sensors and fans; then L3 (processes and control); measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
+- **Current milestone:** zTop for Linux, L4 (discovery, alerts and the hub), after the 0.1.0 release.
+- **Last done:** zTop for Linux L2 (host detail, decision 0066) and L3 (processes and control, decision 0067).
+- **Next step:** L4; a recorded detail run on a machine with temperature sensors and fans; measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
 - **Blocked on:** nothing.
 
 ## Log
 
 Newest first. One or two lines per session: what changed, what is next.
+
+- 2026-11-19: zTop for Linux L3 (decision 0067): a Processes section on the detail page (search, sort with a pid tie-break, 30 busiest rows from the poll, a signal menu per row from the target's catalog via new `RemoteCollector::signal_catalog`, KILL behind an `AdwAlertDialog`). End-to-end test sends STOP, CONT and TERM to a `sleep` it owns and checks `/proc`. Recorded `desktop-processes.png` (`ZTOP_DESKTOP_SEARCH`, `ZTOP_DESKTOP_SCROLL` hooks). Next: L4.
 
 - 2026-11-19: zTop for Linux L2 (decision 0066): a card click opens the host's detail page, seeded from the agent's `/v1/history` (new `RemoteCollector::history` in `ztop-core`) and then fed by the fleet poll; cairo charts with a 1-2-5 scale and a span that grows with the held history, per-core bars, disk rows. New check.sh stage `recorded-detail` (`ZTOP_DESKTOP_DETAIL`, `ZTOP_DESKTOP_SIZE` hooks). The recording machine has no sensors, so the temperature and fan sections are unit-tested only. Next: L3.
 
