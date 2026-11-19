@@ -34,3 +34,29 @@ jobs:
             libgtk-4-dev libadwaita-1-dev libsecret-1-dev \
             xvfb xauth dbus-x11 gnome-keyring libsecret-tools
       - run: desktop/scripts/check.sh
+
+  arch:
+    # The same checks on Arch Linux, which Omarchy and other Arch-based
+    # systems track, then the ztop-desktop package (packaging/arch,
+    # decision 0076) built, linted, installed and removed. The checks run
+    # as an unprivileged user: gnome-keyring refuses to start as root
+    # in a container, and makepkg refuses root.
+    name: Desktop (Arch)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 60
+    steps:
+      - name: GTK, libadwaita, libsecret, the headless test session and the package tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust cargo-deny \
+            gtk4 libadwaita libsecret gnome-keyring xorg-server-xvfb xorg-xauth \
+            namcap desktop-file-utils
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: desktop/scripts/check.sh as an unprivileged user
+        run: |
+          useradd -m builder
+          cp -a "$GITHUB_WORKSPACE" /home/builder/src
+          chown -R builder: /home/builder/src
+          su builder -c 'cd /home/builder/src && desktop/scripts/check.sh'
+      - name: Build, lint, install and remove ztop-desktop
+        run: packaging/arch/check-arch.sh ztop-desktop
