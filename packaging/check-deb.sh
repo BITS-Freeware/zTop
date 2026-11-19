@@ -35,18 +35,29 @@ step "The package installs into /usr and carries its repository and key"
 CONTENTS="$(dpkg-deb -c "$DEB")"
 for f in ./usr/bin/ztop ./usr/lib/systemd/user/ztop-agent.service ./usr/share/man/man1/ztop.1.gz \
          ./usr/share/doc/ztop/copyright ./etc/apt/sources.list.d/ztop.sources \
-         ./usr/share/keyrings/ztop-archive-keyring.gpg; do
+         ./usr/share/keyrings/ztop-archive-keyring.gpg ./usr/lib/systemd/system/ztop-agent.service \
+         ./usr/lib/sysusers.d/ztop.conf ./etc/default/ztop-agent ./usr/lib/ztop/pair-system-agent \
+         ./usr/share/doc/ztop/README.server; do
   grep -q " $f\$" <<<"$CONTENTS" || fail "$DEB has no $f"
 done
 grep -q ' \./usr/local' <<<"$CONTENTS" && fail "$DEB installs into /usr/local, which belongs to the person, not to packages"
 CONFFILES="$(dpkg-deb --ctrl-tarfile "$DEB" | tar -xO ./conffiles)"
 grep -qx /etc/apt/sources.list.d/ztop.sources <<<"$CONFFILES" \
   || fail "the sources entry isn't a conffile, so a person's change to it would be overwritten"
+grep -qx /etc/default/ztop-agent <<<"$CONFFILES" \
+  || fail "the system agent's options file isn't a conffile, so an upgrade would reset its address"
 mkdir -p "$WORK/extract"; dpkg-deb -x "$DEB" "$WORK/extract"
 grep -q '^ExecStart=/usr/bin/ztop agent ' "$WORK/extract/usr/lib/systemd/user/ztop-agent.service" \
   || fail "the packaged agent unit doesn't start /usr/bin/ztop"
 grep '^ExecStart=' "$WORK/extract/usr/lib/systemd/user/ztop-agent.service" | grep -q -- '--allow-control' \
   && fail "the packaged agent unit allows control; it must be read-only"
+SYSTEM_UNIT="$WORK/extract/usr/lib/systemd/system/ztop-agent.service"
+grep -qx 'User=ztop' "$SYSTEM_UNIT" || fail "the system agent unit doesn't run as the ztop user"
+grep -q '^ExecStart=/usr/bin/ztop agent --tls ' "$SYSTEM_UNIT" || fail "the system agent unit doesn't serve TLS"
+grep '^ExecStart=' "$SYSTEM_UNIT" | grep -qE -- '--allow-control|--allow-manage|--pair' \
+  && fail "the system agent unit pairs or grants control or management; it must be read-only and never pair"
+grep -qE '^ZTOP_AGENT_ARGS=.*--(allow-control|allow-manage|pair)' "$WORK/extract/etc/default/ztop-agent" \
+  && fail "the shipped options file pairs or grants rights"
 WANT="$(gpg --show-keys --with-colons packaging/linux/ztop-archive-keyring.asc | awk -F: '/^fpr/{print $10; exit}')"
 GOT="$(gpg --show-keys --with-colons "$WORK/extract/usr/share/keyrings/ztop-archive-keyring.gpg" | awk -F: '/^fpr/{print $10; exit}')"
 [ -n "$WANT" ] && [ "$GOT" = "$WANT" ] || fail "the packaged keyring ($GOT) isn't packaging/linux/ztop-archive-keyring.asc ($WANT)"
@@ -79,6 +90,37 @@ dpkg -s ztop | grep -q '^Status: install ok installed' || fail "ztop isn't insta
 [ -f /etc/apt/sources.list.d/ztop.sources ] || fail "the installed package didn't add the apt repository"
 [ "$(command -v ztop)" = /usr/bin/ztop ] || fail "ztop isn't /usr/bin/ztop"
 ztop --version
+
+step "The system agent runs as ztop and pairs one read-only client over loopback"
+getent passwd ztop | grep -q ':/usr/sbin/nologin$' || fail "the install didn't create the ztop system user"
+[ "$(id -u ztop)" -lt 1000 ] || fail "the ztop user isn't a system user"
+if command -v systemd-analyze >/dev/null 2>&1; then
+  systemd-analyze verify /usr/lib/systemd/system/ztop-agent.service || fail "systemd rejects the system agent unit"
+fi
+PAIRED="$(/usr/lib/ztop/pair-system-agent --port 7199)"
+PIN="$(sed -n 's/.*"pin":"\(SHA256:[0-9a-f]\{64\}\)".*/\1/p' <<<"$PAIRED")"
+TOKEN="$(sed -n 's/.*"token":"\([0-9a-f]\{16,\}\)".*/\1/p' <<<"$PAIRED")"
+[ -n "$PIN" ] && [ -n "$TOKEN" ] || fail "the pairing helper printed no pin and token"
+[ "$(stat -c %U:%a /var/lib/ztop)" = ztop:700 ] || fail "/var/lib/ztop isn't private to ztop"
+[ "$(stat -c %U:%a /var/lib/ztop/ztop/tokens.json)" = ztop:600 ] || fail "the tokens file isn't private to ztop"
+grep -q "$TOKEN" /var/lib/ztop/ztop/tokens.json && fail "the tokens file holds the raw token, not its hash"
+# Run the agent the way the unit does (CI containers have no systemd).
+runuser -u ztop -- env HOME=/var/lib/ztop XDG_CONFIG_HOME=/var/lib/ztop \
+  /usr/bin/ztop agent --tls --no-advertise --bind 127.0.0.1 --port 7198 >"$WORK/system-agent.log" 2>&1 &
+SYSTEM_AGENT=$!
+for _ in $(seq 1 50); do curl -ksf https://127.0.0.1:7198/healthz >/dev/null 2>&1 && break; sleep 0.1; done
+grep -q "TLS fingerprint: $PIN" "$WORK/system-agent.log" || fail "the system agent's certificate isn't the one that was paired"
+grep -q 'Pairing code' "$WORK/system-agent.log" && fail "the system agent printed a pairing code"
+[ "$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:7198/v1/snapshot)" = 401 ] \
+  || fail "the system agent served a snapshot without a token"
+[ "$(curl -ks -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" https://127.0.0.1:7198/v1/snapshot)" = 200 ] \
+  || fail "the paired token can't read a snapshot"
+CONTROL="$(curl -ks -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"pids":[1],"action":{"Signal":0}}' https://127.0.0.1:7198/v1/control)"
+[ "$CONTROL" = 403 ] || fail "the system agent answered a control request with $CONTROL, not 403"
+[ "$(curl -ks -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" https://127.0.0.1:7198/v1/tokens)" = 403 ] \
+  || fail "the paired token can list tokens"
+kill "$SYSTEM_AGENT"; wait "$SYSTEM_AGENT" 2>/dev/null || true
 
 step "Running it again keeps the same version installed"
 curl -fsSL "$ZTOP_DOWNLOADS/install.sh" | sh >/dev/null
@@ -120,4 +162,6 @@ apt-get purge -y -qq ztop >/dev/null
 rm -f /usr/share/keyrings/ztop-check-keyring.gpg
 [ ! -e /etc/apt/sources.list.d/ztop.sources ] || fail "purging left the sources entry"
 [ ! -e /usr/bin/ztop ] || fail "purging left /usr/bin/ztop"
+[ ! -e /var/lib/ztop ] || fail "purging left the system agent's certificate and tokens"
+[ ! -e /etc/default/ztop-agent ] || fail "purging left /etc/default/ztop-agent"
 echo "ztop installs with the one-line installer, updates through a signed apt repository, and refuses a tampered one."
