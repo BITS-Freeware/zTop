@@ -150,21 +150,33 @@ impl Store {
         Ok(Store { pool })
     }
 
-    /// File one sample under `host`.
-    pub async fn insert(&self, host: &str, ts_ms: u64, payload: &str) -> Result<(), sqlx::Error> {
-        sqlx::query("INSERT INTO samples (host, ts_ms, payload) VALUES (?, ?, ?)")
+    /// File one sample under `host`: `ts_ms` is the agent's own
+    /// timestamp, kept for reference, and `received_ms` the hub's clock
+    /// when the poll answered, which every window and the retention
+    /// prune go by.
+    pub async fn insert(
+        &self,
+        host: &str,
+        ts_ms: u64,
+        received_ms: u64,
+        payload: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT INTO samples (host, ts_ms, received_ms, payload) VALUES (?, ?, ?, ?)")
             .bind(host)
             .bind(ts_ms as i64)
+            .bind(received_ms as i64)
             .bind(payload)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    /// The newest sample for `host`, or `None` before the first poll.
+    /// The newest sample for `host` by the hub's clock, or `None`
+    /// before the first poll. An agent whose clock stepped backward
+    /// cannot pin an older sample as the latest.
     pub async fn latest(&self, host: &str) -> Result<Option<Sample>, sqlx::Error> {
         let row: Option<(String,)> = sqlx::query_as(
-            "SELECT payload FROM samples WHERE host = ? ORDER BY ts_ms DESC LIMIT 1",
+            "SELECT payload FROM samples WHERE host = ? ORDER BY received_ms DESC, id DESC LIMIT 1",
         )
         .bind(host)
         .fetch_optional(&self.pool)
@@ -172,12 +184,14 @@ impl Store {
         Ok(row.and_then(|row| serde_json::from_str(&row.0).ok()))
     }
 
-    /// Samples for `host` from the last `seconds` seconds, oldest
-    /// first, the same shape the agent's history serves.
+    /// Samples for `host` the hub received in the last `seconds`
+    /// seconds, in the order it received them, the same shape the
+    /// agent's history serves.
     pub async fn since(&self, host: &str, seconds: u64) -> Result<Vec<Sample>, sqlx::Error> {
         let from = now_ms().saturating_sub(seconds.saturating_mul(1000)) as i64;
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT payload FROM samples WHERE host = ? AND ts_ms >= ? ORDER BY ts_ms ASC",
+            "SELECT payload FROM samples WHERE host = ? AND received_ms >= ? \
+             ORDER BY received_ms ASC, id ASC",
         )
         .bind(host)
         .bind(from)
@@ -195,7 +209,7 @@ impl Store {
     /// retention window).
     pub async fn prune(&self, older_than_ms: u64) -> Result<(), sqlx::Error> {
         let cutoff = now_ms().saturating_sub(older_than_ms) as i64;
-        sqlx::query("DELETE FROM samples WHERE ts_ms < ?")
+        sqlx::query("DELETE FROM samples WHERE received_ms < ?")
             .bind(cutoff)
             .execute(&self.pool)
             .await?;
@@ -286,7 +300,7 @@ impl HubState {
                 if let Ok(payload) = serde_json::to_string(&stored) {
                     let _ = self
                         .store
-                        .insert(&agent.name, stored.timestamp_ms, &payload)
+                        .insert(&agent.name, stored.timestamp_ms, now_ms(), &payload)
                         .await;
                 }
                 self.latest
@@ -826,6 +840,7 @@ mod tests {
                 .insert(
                     "host-a",
                     base - age,
+                    base - age,
                     &serde_json::to_string(&sample).unwrap(),
                 )
                 .await
@@ -833,7 +848,12 @@ mod tests {
         }
         let b = a_sample("host-b", base - 3000, 3.0);
         store
-            .insert("host-b", base - 3000, &serde_json::to_string(&b).unwrap())
+            .insert(
+                "host-b",
+                base - 3000,
+                base - 3000,
+                &serde_json::to_string(&b).unwrap(),
+            )
             .await
             .expect("insert");
         assert_eq!(
@@ -871,7 +891,7 @@ mod tests {
             let sample = a_sample("host-a", ts, 1.0);
             state
                 .store
-                .insert("host-a", ts, &serde_json::to_string(&sample).unwrap())
+                .insert("host-a", ts, ts, &serde_json::to_string(&sample).unwrap())
                 .await
                 .expect("insert");
         }
@@ -879,6 +899,37 @@ mod tests {
         let left = state.store.since("host-a", u64::MAX).await.expect("since");
         assert_eq!(left.len(), 1, "the 3-day-old row must be gone");
         assert_eq!(left[0].timestamp_ms, now - 1000);
+    }
+
+    /// Regression (audit M4): rows were filed, windowed and pruned by
+    /// the agent's timestamp but compared with the hub's clock, so an
+    /// agent with a skewed clock got wrong windows, and one stepped
+    /// backward pinned a stale "latest".
+    #[tokio::test]
+    async fn windows_and_latest_follow_the_hubs_clock_not_the_agents() {
+        let state = hub_with(two_agents(), false).await;
+        let agent = state.config.agents[0].clone();
+        let day = 24 * 60 * 60 * 1000;
+        // An agent a day behind: by its own clock this sample is a day
+        // old, but the hub just received it.
+        state
+            .record(&agent, Ok(a_sample("host-a", now_ms() - day, 1.0)))
+            .await;
+        let recent = state.store.since("host-a", 60).await.expect("since");
+        assert_eq!(recent.len(), 1, "a just-received sample is in the window");
+        state.prune_expired().await.expect("prune");
+        assert_eq!(
+            state.store.since("host-a", 60).await.expect("since").len(),
+            1,
+            "retention does not delete what arrived a moment ago"
+        );
+        // The agent's clock steps back another day; the newer poll
+        // must still be the latest.
+        state
+            .record(&agent, Ok(a_sample("host-a", now_ms() - 2 * day, 2.0)))
+            .await;
+        let latest = state.store.latest("host-a").await.expect("latest");
+        assert_eq!(latest.map(|sample| sample.load_avg[0]), Some(2.0));
     }
 
     fn a_process(pid: u32) -> ztop_core::model::Process {
@@ -945,7 +996,7 @@ mod tests {
             let sample = a_sample("host-a", ts, 1.0);
             state
                 .store
-                .insert("host-a", ts, &serde_json::to_string(&sample).unwrap())
+                .insert("host-a", ts, ts, &serde_json::to_string(&sample).unwrap())
                 .await
                 .expect("insert");
         }
@@ -986,6 +1037,7 @@ mod tests {
             .insert(
                 "host-a",
                 sample.timestamp_ms,
+                sample.timestamp_ms,
                 &serde_json::to_string(&sample).unwrap(),
             )
             .await
@@ -1017,6 +1069,7 @@ mod tests {
                 .store
                 .insert(
                     "host-a",
+                    sample.timestamp_ms,
                     sample.timestamp_ms,
                     &serde_json::to_string(&sample).unwrap(),
                 )
