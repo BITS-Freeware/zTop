@@ -24,10 +24,14 @@ keyring, or to 0600 files beside `hosts.json` when no keyring runs.
 `libsecret-1-dev`, `cargo-deny`, `xvfb`, `xauth`, `dbus-x11`, `gnome-keyring` and `libsecret-tools`:
 the tests start a throwaway keyring in their own D-Bus session, and the
 recorded run (`desktop/scripts/recorded-run.sh`) draws the window under
-Xvfb with two paired agents.
+Xvfb with two paired agents, once on the fleet and once (`DETAIL=host-a`)
+on a host's detail page.
 
 ## Layout
 
 - `crates/desktop-core`: saved hosts, token store, live state, card
-  figures and agent calls, through this repository's `ztop-core` client.
-- `crates/desktop`: the window, the dialogs and the keyring store.
+  figures, a host's recent history and the series its charts draw, the
+  process table's search, sort and signal menu, Bonjour discovery, alert
+  rules and their engine, and agent and hub calls, through this repository's `ztop-core` client.
+- `crates/desktop`: the window, the dialogs, the detail page and the
+  keyring store.

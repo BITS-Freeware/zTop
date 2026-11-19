@@ -5,9 +5,92 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use ztop_desktop_core::{NewHost, agent};
+use ztop_desktop_core::{NewHost, agent, discovery};
 
 use crate::app::Fleet;
+
+/// Agents advertising on the network (Bonjour). Choosing one fills in
+/// the name, address and port; the fingerprint is still pasted from
+/// the agent, because an advertisement proves nothing about who sent it.
+fn nearby_group(
+    name: &adw::EntryRow,
+    host: &adw::EntryRow,
+    port: &adw::EntryRow,
+    pin: &adw::EntryRow,
+) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("On This Network")
+        .description("Agents started with --tls appear here.")
+        .build();
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .build();
+    list.add_css_class("boxed-list");
+    let looking = adw::ActionRow::builder()
+        .title("Looking for agents…")
+        .build();
+    list.append(&looking);
+    group.add(&list);
+
+    let browser = match discovery::Browser::start() {
+        Ok(browser) => Rc::new(std::cell::RefCell::new(browser)),
+        Err(why) => {
+            looking.set_title("Looking for agents is not possible here");
+            looking.set_subtitle(&glib::markup_escape_text(&why));
+            return group;
+        }
+    };
+    let (name, host, port, pin) = (name.clone(), host.clone(), port.clone(), pin.clone());
+    let weak_list = list.downgrade();
+    // The browse lives as long as the dialog shows the list.
+    glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        let Some(list) = weak_list.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if !list.is_mapped() && list.root().is_none() {
+            return glib::ControlFlow::Break;
+        }
+        if !browser.borrow_mut().poll() {
+            return glib::ControlFlow::Continue;
+        }
+        while let Some(row) = list.row_at_index(0) {
+            list.remove(&row);
+        }
+        let found = browser.borrow().found();
+        if found.is_empty() {
+            list.append(
+                &adw::ActionRow::builder()
+                    .title("Looking for agents…")
+                    .build(),
+            );
+        }
+        for agent in found {
+            let row = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(&agent.name).as_str())
+                .subtitle(
+                    glib::markup_escape_text(&format!("{}:{}", agent.host, agent.port)).as_str(),
+                )
+                .activatable(agent.compatible())
+                .build();
+            if !agent.compatible() {
+                row.set_subtitle("Speaks another protocol version: update the agent or this app.");
+                row.set_sensitive(false);
+            }
+            let (name, host, port, pin) = (name.clone(), host.clone(), port.clone(), pin.clone());
+            row.connect_activated(move |_| {
+                if name.text().is_empty() {
+                    name.set_text(&agent.name);
+                }
+                host.set_text(&agent.host);
+                port.set_text(&agent.port.to_string());
+                pin.grab_focus();
+            });
+            list.append(&row);
+        }
+        glib::ControlFlow::Continue
+    });
+    group
+}
 
 fn entry_row(title: &str) -> adw::EntryRow {
     adw::EntryRow::builder().title(title).build()
@@ -23,6 +106,22 @@ pub fn add_host(fleet: &Rc<Fleet>) {
     port.set_input_purpose(gtk::InputPurpose::Digits);
     let pin = entry_row("TLS fingerprint (SHA256:…)");
     let code = entry_row("Pairing code");
+    let hub = adw::SwitchRow::builder()
+        .title("This is a hub")
+        .subtitle(
+            "A hub watches a fleet: each machine it watches gets a card, read through the hub.",
+        )
+        .build();
+    {
+        let port = port.clone();
+        hub.connect_active_notify(move |hub| {
+            // Follow the switch while the port is still a default.
+            let text = port.text();
+            if text == "7100" || text == "7101" || text.is_empty() {
+                port.set_text(if hub.is_active() { "7101" } else { "7100" });
+            }
+        });
+    }
 
     let connection = adw::PreferencesGroup::builder()
         .title("Connection")
@@ -31,6 +130,7 @@ pub fn add_host(fleet: &Rc<Fleet>) {
     for row in [&name, &host, &port] {
         connection.add(row);
     }
+    connection.add(&hub);
     let trust = adw::PreferencesGroup::builder().title("Trust").build();
     trust.add(&pin);
     trust.add(&code);
@@ -51,6 +151,7 @@ pub fn add_host(fleet: &Rc<Fleet>) {
         .margin_start(18)
         .margin_end(18)
         .build();
+    page.append(&nearby_group(&name, &host, &port, &pin));
     page.append(&connection);
     page.append(&trust);
     page.append(&problem);
@@ -65,9 +166,16 @@ pub fn add_host(fleet: &Rc<Fleet>) {
     header.pack_start(&cancel);
     header.pack_end(&add);
     header.pack_end(&spinner);
+    // The nearby list grows; the form scrolls instead of outgrowing
+    // a small window.
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .child(&page)
+        .build();
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
-    view.set_content(Some(&page));
+    view.set_content(Some(&scroller));
 
     let dialog = adw::Dialog::builder()
         .title("Add a Host")
@@ -90,6 +198,7 @@ pub fn add_host(fleet: &Rc<Fleet>) {
             port: port.text().into(),
             pin: pin.text().into(),
             code: code.text().into(),
+            hub: hub.is_active(),
         };
         let record = match form.validate() {
             Ok(record) => record,

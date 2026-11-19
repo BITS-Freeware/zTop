@@ -4,8 +4,24 @@
 //!
 //! - `ZTOP_DESKTOP_SEED`: hosts to pair and add when no saved host has
 //!   that name, as `name|address|port|fingerprint|code` entries joined
-//!   by `;` (fingerprint and code empty for a plain loopback agent).
-//! - `ZTOP_DESKTOP_OPEN=add`: open the add-host dialog at start.
+//!   by `;` (fingerprint and code empty for a plain loopback agent). A
+//!   sixth field `hub` adds a hub.
+//! - `ZTOP_DESKTOP_OPEN=add`: open the add-host dialog at start;
+//!   `ZTOP_DESKTOP_OPEN=alerts`: open the alerts page.
+//! - `ZTOP_DESKTOP_ALERT=<name>|<kind>|<threshold>|<seconds>`: add that
+//!   rule for every host when no rule is saved (`kind` as in
+//!   alerts.json: cpu, memory, load, disk, unreachable). Fired and
+//!   cleared alerts are reported as `ztop-desktop: alert fired <rule>
+//!   on <host>` lines.
+//! - `ZTOP_DESKTOP_SIZE=<width>x<height>`: the window's size, so a
+//!   recorded page fits in one picture.
+//! - `ZTOP_DESKTOP_DETAIL=<name>`: open that host's detail page once
+//!   it has a live sample; the snapshot report then names the sections
+//!   the page shows and how many samples it holds.
+//! - `ZTOP_DESKTOP_SEARCH=<text>`: start the process table's search
+//!   with this text.
+//! - `ZTOP_DESKTOP_SCROLL=processes`: once the detail page is open,
+//!   scroll it to the process table.
 //! - `ZTOP_DESKTOP_SNAPSHOT=<file.png>`: after
 //!   `ZTOP_DESKTOP_SNAPSHOT_AFTER` seconds (default 8), draw the window
 //!   into that PNG and quit. The app's own render, so no screen capture
@@ -23,11 +39,26 @@ use ztop_desktop_core::{NewHost, agent};
 use crate::app::Fleet;
 
 pub fn run(fleet: &Rc<Fleet>) {
-    if std::env::var("ZTOP_DESKTOP_OPEN").as_deref() == Ok("add") {
-        crate::dialogs::add_host(fleet);
+    let alert = std::env::var("ZTOP_DESKTOP_ALERT").unwrap_or_default();
+    if !alert.trim().is_empty() {
+        seed_alert(fleet, alert.trim());
+    }
+    match std::env::var("ZTOP_DESKTOP_OPEN").as_deref() {
+        Ok("add") => crate::dialogs::add_host(fleet),
+        Ok("alerts") => fleet.open_alerts(),
+        _ => {}
     }
     if let Ok(seed) = std::env::var("ZTOP_DESKTOP_SEED") {
         seed_hosts(fleet, &seed);
+    }
+    if let Some((width, height)) = std::env::var("ZTOP_DESKTOP_SIZE").ok().and_then(|s| {
+        let (w, h) = s.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    }) {
+        fleet.window.set_default_size(width, height);
+    }
+    if let Ok(name) = std::env::var("ZTOP_DESKTOP_DETAIL") {
+        open_detail_when_live(fleet, name);
     }
     if let Ok(path) = std::env::var("ZTOP_DESKTOP_SNAPSHOT") {
         let after = std::env::var("ZTOP_DESKTOP_SNAPSHOT_AFTER")
@@ -45,6 +76,12 @@ pub fn run(fleet: &Rc<Fleet>) {
             for (name, state) in fleet.states() {
                 eprintln!("ztop-desktop: host {name} {state}");
             }
+            if let Some(detail) = fleet.detail.borrow().as_ref() {
+                eprintln!("ztop-desktop: detail samples {}", detail.samples());
+                for section in detail.visible_sections() {
+                    eprintln!("ztop-desktop: detail shows {section}");
+                }
+            }
             if let Some(app) = fleet.window.application() {
                 app.quit();
             }
@@ -52,13 +89,68 @@ pub fn run(fleet: &Rc<Fleet>) {
     }
 }
 
+/// Checks twice a second until the named host is live, then opens it.
+fn open_detail_when_live(fleet: &Rc<Fleet>, name: String) {
+    let fleet = Rc::downgrade(fleet);
+    glib::timeout_add_local(Duration::from_millis(500), move || {
+        let Some(fleet) = fleet.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let live = fleet
+            .states()
+            .into_iter()
+            .any(|(n, state)| n == name && state == "live");
+        if !live {
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(record) = fleet.all_records().into_iter().find(|r| r.name == name) {
+            fleet.open_detail(&record.id);
+            if std::env::var("ZTOP_DESKTOP_SCROLL").as_deref() == Ok("processes") {
+                // After the history and the first layout have landed.
+                let fleet = Rc::downgrade(&fleet);
+                glib::timeout_add_local_once(Duration::from_secs(3), move || {
+                    if let Some(detail) = fleet.upgrade().and_then(|f| f.detail.borrow().clone()) {
+                        detail.scroll_to_processes();
+                    }
+                });
+            }
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+fn seed_alert(fleet: &Rc<Fleet>, spec: &str) {
+    use ztop_desktop_core::alerts::{AlertKind, AlertRule};
+    let parts: Vec<&str> = spec.split('|').collect();
+    let [name, kind, threshold, seconds] = parts[..] else {
+        eprintln!("ztop-desktop: an alert seed needs four fields: {spec}");
+        return;
+    };
+    let kind = match serde_json::from_value::<AlertKind>(serde_json::Value::from(kind)) {
+        Ok(kind) => kind,
+        Err(_) => {
+            eprintln!("ztop-desktop: unknown alert kind {kind}");
+            return;
+        }
+    };
+    let (Ok(threshold), Ok(seconds)) = (threshold.parse(), seconds.parse()) else {
+        eprintln!("ztop-desktop: the alert seed's threshold and seconds are numbers: {spec}");
+        return;
+    };
+    fleet.seed_alert(AlertRule::new(name, None, kind, threshold, seconds));
+}
+
 fn seed_hosts(fleet: &Rc<Fleet>, seed: &str) {
     let known: Vec<String> = fleet.records().into_iter().map(|r| r.name).collect();
     for entry in seed.split(';').filter(|e| !e.trim().is_empty()) {
         let parts: Vec<&str> = entry.split('|').collect();
-        let [name, host, port, pin, code] = parts[..] else {
-            eprintln!("ztop-desktop: a seed entry needs five fields: {entry}");
-            continue;
+        let (name, host, port, pin, code, kind) = match parts[..] {
+            [name, host, port, pin, code] => (name, host, port, pin, code, ""),
+            [name, host, port, pin, code, kind] => (name, host, port, pin, code, kind),
+            _ => {
+                eprintln!("ztop-desktop: a seed entry needs five or six fields: {entry}");
+                continue;
+            }
         };
         if known.iter().any(|k| k == name) {
             continue;
@@ -69,6 +161,7 @@ fn seed_hosts(fleet: &Rc<Fleet>, seed: &str) {
             port: port.into(),
             pin: pin.into(),
             code: code.into(),
+            hub: kind == "hub",
         };
         let record = match form.validate() {
             Ok(record) => record,

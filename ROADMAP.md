@@ -85,7 +85,7 @@ Windows, remote command execution of any kind, a cloud service or accounts, and 
 A GTK4 and libadwaita desktop app in `desktop/` (decision 0065), built on `ztop-core`'s client. Each milestone ends with `desktop/scripts/check.sh` and the Desktop workflow green.
 
 - **L1: fleet list and pairing.** Done when the app pairs two TLS agents in a recorded run and the logic crate's tests pass in CI.
-- **L2: host detail.** History charts for CPU, memory, load, disks, network, temperatures and fans, plus per-core bars. Done when a recorded run shows every section against a live Linux agent.
-- **L3: processes and control.** Search, sort, and signals from the target's own catalog, SIGKILL behind a confirm. Done when an end-to-end test sends STOP, CONT and TERM to a process it owns.
-- **L4: discovery, alerts and the hub.** Bonjour browsing, alert rules with desktop notifications, and a fleet read through one hub. Done when three agents read back live through a hub in a recorded run.
+- **L2: host detail.** History charts for CPU, memory, load, disks, network, temperatures and fans, plus per-core bars. Done when a recorded run shows every section against a live Linux agent. *Built (decision 0066): the recorded run shows every section the host reports; temperatures and fans wait on a run against a machine with sensors.*
+- **L3: processes and control.** Search, sort, and signals from the target's own catalog, SIGKILL behind a confirm. Done when an end-to-end test sends STOP, CONT and TERM to a process it owns. *Done (decision 0067).*
+- **L4: discovery, alerts and the hub.** Bonjour browsing, alert rules with desktop notifications, and a fleet read through one hub. Done when three agents read back live through a hub in a recorded run. *Done (decision 0075).*
 - **L5: packaging.** A .deb for amd64 and arm64 and a Flatpak manifest, with a desktop file and icon. Done when a clean Ubuntu 24.04 container installs the .deb and the app starts under a test display.

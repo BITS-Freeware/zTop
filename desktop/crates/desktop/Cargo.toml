@@ -18,3 +18,4 @@ ztop-core = { workspace = true }
 gtk = { workspace = true }
 adw = { workspace = true }
 libsecret = { workspace = true }
+serde_json = { workspace = true }

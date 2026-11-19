@@ -68,15 +68,19 @@ impl Card {
             .build();
         name.add_css_class("heading");
         let address = gtk::Label::builder()
-            .label(format!(
-                "{} · {}",
-                record.target(),
-                if record.pin.is_empty() {
-                    "plain, loopback"
-                } else {
-                    "TLS"
-                }
-            ))
+            .label(match &record.via {
+                Some(_) => format!("through the hub at {}", record.target()),
+                None => format!(
+                    "{} · {}{}",
+                    record.target(),
+                    if record.pin.is_empty() {
+                        "plain, loopback"
+                    } else {
+                        "TLS"
+                    },
+                    if record.hub { " · hub" } else { "" }
+                ),
+            })
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build();
@@ -121,6 +125,10 @@ impl Card {
         body.append(&system);
         body.append(&cpu_row);
         body.append(&memory_row);
+        // A hub's card counts its machines instead of metering itself.
+        cpu_row.set_visible(!record.hub);
+        memory_row.set_visible(!record.hub);
+        system.set_visible(!record.hub);
         body.append(&uptime);
         body.append(&error);
         body.append(&pair);
@@ -149,20 +157,34 @@ impl Card {
         card
     }
 
-    /// Shows a host's latest state; stale and unreachable keep the last
-    /// values on screen, flagged by the pill's colour.
-    pub fn show(&self, live: &HostLive) {
-        self.state.set_label(live.state.label());
+    /// A hub's state and what it watches, in one line.
+    pub fn show_hub(&self, state: HostState, summary: &str, error: Option<&str>) {
+        self.set_state(state);
+        self.uptime.set_label(summary);
+        self.error.set_label(error.unwrap_or_default());
+        self.error
+            .set_visible(state != HostState::Live && error.is_some());
+        self.pair.set_visible(state == HostState::NeedsPairing);
+    }
+
+    fn set_state(&self, state: HostState) {
+        self.state.set_label(state.label());
         for class in ["live", "stale", "unreachable", "pairing", "connecting"] {
             self.state.remove_css_class(class);
         }
-        self.state.add_css_class(match live.state {
+        self.state.add_css_class(match state {
             HostState::Live => "live",
             HostState::Stale => "stale",
             HostState::Unreachable => "unreachable",
             HostState::NeedsPairing => "pairing",
             HostState::Connecting => "connecting",
         });
+    }
+
+    /// Shows a host's latest state; stale and unreachable keep the last
+    /// values on screen, flagged by the pill's colour.
+    pub fn show(&self, live: &HostLive) {
+        self.set_state(live.state);
 
         let summary = live.sample.as_ref().map(CardSummary::of);
         let percent = |value: Option<f64>, bar: &gtk::LevelBar, text: &gtk::Label| {

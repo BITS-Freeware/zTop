@@ -3,10 +3,13 @@
 //! logic lives in `ztop-desktop-core`; this crate is the window, the
 //! dialogs and the threads that keep network calls off the UI.
 
+mod alerts;
 mod app;
 mod card;
+mod detail;
 mod dialogs;
 mod hooks;
+mod processes;
 mod secret;
 
 use adw::prelude::*;

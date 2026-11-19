@@ -11,6 +11,15 @@
 # With a second argument, host-b's agent is stopped that many seconds
 # in, to record the stale or unreachable card instead; the check then
 # expects host-b in the state named by EXPECT_B (default stale).
+# With DETAIL=host-a the app opens that host's detail page instead and
+# the check also expects the CPU, memory and load sections and the
+# per-core bars; SNAPSHOT_AFTER (default 8) sets how long it runs, and
+# SIZE (default 1000x1500) the window, so the page fits one picture.
+# ALERT (a ZTOP_DESKTOP_ALERT rule) and OPEN (alerts or add) pass
+# through to the app; with EXPECT_ALERT the check also expects that
+# rule to have fired for host-b.
+# SEARCH prefills the process search and SCROLL=processes scrolls the
+# page to the process table.
 # Needs xvfb-run, dbus-run-session and gnome-keyring-daemon; the app
 # ztop and the app built (cargo build at the root and in desktop/).
 set -eu
@@ -46,15 +55,18 @@ if [ -n "$KILL_B" ]; then
     (sleep "$KILL_B"; kill "$(cat "$WORK/host-b.pid")") &
     AFTER=$((KILL_B + ${STALE_FOR:-4}))
 else
-    AFTER=8
+    AFTER="${SNAPSHOT_AFTER:-8}"
 fi
+DETAIL_ENV=""
+[ -n "${DETAIL:-}" ] && DETAIL_ENV="ZTOP_DESKTOP_DETAIL=$DETAIL ZTOP_DESKTOP_SIZE=${SIZE:-1000x1500} ZTOP_DESKTOP_SEARCH=${SEARCH:-} ZTOP_DESKTOP_SCROLL=${SCROLL:-}"
 
 mkdir -p "$WORK/home/.cache"
 cat >"$WORK/session.sh" <<INNER
 eval \$(printf test | gnome-keyring-daemon --unlock --components=secrets)
 ZTOP_DESKTOP_HOME="$WORK/config" ZTOP_DESKTOP_SEED="$SEED" \
-ZTOP_DESKTOP_SNAPSHOT="$OUT" ZTOP_DESKTOP_SNAPSHOT_AFTER=$AFTER GTK_A11Y=none \
-    xvfb-run -a -s "-screen 0 1280x800x24" "$APP"
+ZTOP_DESKTOP_SNAPSHOT="$OUT" ZTOP_DESKTOP_SNAPSHOT_AFTER=$AFTER GTK_A11Y=none $DETAIL_ENV \
+ZTOP_DESKTOP_ALERT="${ALERT:-}" ZTOP_DESKTOP_OPEN="${OPEN:-}" \
+    xvfb-run -a -s "-screen 0 1600x2600x24" "$APP"
 INNER
 HOME="$WORK/home" dbus-run-session -- sh "$WORK/session.sh" 2>&1 | grep '^ztop-desktop:' | tee "$WORK/report"
 
@@ -62,4 +74,12 @@ grep -q "^ztop-desktop: wrote " "$WORK/report"
 grep -q "^ztop-desktop: tokens in the desktop keyring$" "$WORK/report"
 grep -q "^ztop-desktop: host host-a live$" "$WORK/report"
 grep -q "^ztop-desktop: host host-b $EXPECT_B$" "$WORK/report"
+if [ -n "${EXPECT_ALERT:-}" ]; then
+    grep -q "^ztop-desktop: alert fired $EXPECT_ALERT on host-b$" "$WORK/report"
+fi
+if [ -n "${DETAIL:-}" ]; then
+    for section in CPU Memory "Load average" "per-core bars" Processes; do
+        grep -q "^ztop-desktop: detail shows $section$" "$WORK/report"
+    done
+fi
 echo "recorded-run: ok ($OUT)"

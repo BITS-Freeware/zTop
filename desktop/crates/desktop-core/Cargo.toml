@@ -13,3 +13,4 @@ ztop-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 getrandom = { workspace = true }
+mdns-sd = { workspace = true }
