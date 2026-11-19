@@ -1,4 +1,4 @@
-# 0065 — A signed apt repository and a one-line installer
+# 0074 — A signed apt repository and a one-line installer
 
 ## Context
 
@@ -28,12 +28,15 @@ installed copy where to find the next version.
   pinned with `Signed-By`. The key is the shared "Bristlecone IT
   Services apt signing" key, so one key signs every Bristlecone Linux
   package.
-- **Publish Linux Packages**, dispatched by hand from main, publishes a
-  Packaging run's two packages: the pool (never replaced), the
-  by-hash indexes, then the signed `Release`, `Release.gpg` and
-  `InRelease` last, then the latest links and the installer. Its
-  secrets are in the `apt-publish` environment, deployable only from
-  main; CI never sees them. The signing secret is the subkey alone.
+- This repository builds and tests the packages and keeps them as
+  the Packaging workflow's artifacts; it holds no signing key and no
+  credentials for the downloads site. Publishing happens outside this
+  repository: the maintainers' publishing job downloads a Packaging
+  run's two packages, signs the repository with
+  `packaging/build-apt-repo.sh` at that run's commit, and uploads the
+  pool (never replaced), the by-hash indexes, then the signed
+  `Release`, `Release.gpg` and `InRelease` last, then the latest links
+  and the installer. The signing secret is the subkey alone.
 - The one-line installer (`curl -fsSL
   https://downloads.bristleconeit.com/ztop/install.sh | sh`) runs as a
   function called on its last line, so a truncated download runs
@@ -50,6 +53,8 @@ installed copy where to find the next version.
   `/usr`; the `ztop` user it created stays until removed by hand
   (`sudo userdel -r ztop`).
 - The downloads site, its credentials and the signing subkey are
-  outside this repository; publishing needs the `apt-publish`
-  environment's secrets, and a key rotation means committing the new
-  public key here before the next publish.
+  outside this repository, and none of them is ever added to it: this
+  repository is public. A key rotation means committing the new public
+  key here before the next publish.
+- This record was first numbered 0065, the number the Linux desktop
+  app's first decision also took; it was renumbered 0074.

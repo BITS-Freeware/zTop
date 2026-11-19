@@ -397,11 +397,11 @@ The desktop app in `desktop/` (decision 0065), milestone by milestone (ROADMAP.m
   (`packaging/build-deb.sh` packages `/usr/bin/ztop` and
   `/usr/lib/systemd/user/ztop-agent.service`, built natively on Debian 12
   for each architecture; the package adds zTop's signed apt repository,
-  decision 0065. The `ztop` system user of 0.1.0 is gone: the agent is a
+  decision 0074. The `ztop` system user of 0.1.0 is gone: the agent is a
   per-person user service).
 - [x] Install, upgrade and uninstall tested in CI on both
   (`.github/workflows/packaging.yml`: the `.deb` matrix amd64/arm64 and the
   Homebrew job each install, upgrade, pair a test client with the installed
-  agent, and uninstall; green on 0e54b69. Since decision 0065 the `.deb`
+  agent, and uninstall; green on 0e54b69. Since decision 0074 the `.deb`
   jobs install with the one-line installer and upgrade through a signed
   apt repository, `packaging/check-deb.sh`).

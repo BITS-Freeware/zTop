@@ -2,7 +2,7 @@
 
 ## Context
 
-The package's agent is a per-person user service (decision 0065): it
+The package's agent is a per-person user service (decision 0074): it
 starts with that person's session and serves their view of the
 machine. A server has no session. Running the user unit there means
 lingering a login account and keeping the agent's certificate and

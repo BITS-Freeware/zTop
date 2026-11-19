@@ -9,8 +9,8 @@
 # it with apt, which also adds zTop's signed apt repository, so `sudo apt upgrade` installs new
 # versions from then on. Running it again installs the latest version.
 #
-# Published at downloads.bristleconeit.com/ztop/install.sh by the Publish Linux Packages
-# workflow. ZTOP_DOWNLOADS points it at another copy of the downloads site, for testing.
+# Published at downloads.bristleconeit.com/ztop/install.sh with each release.
+# ZTOP_DOWNLOADS points it at another copy of the downloads site, for testing.
 
 # Everything is in a function that runs on the last line, so a download cut short runs nothing,
 # and nothing in it can read the rest of the script from the pipe.

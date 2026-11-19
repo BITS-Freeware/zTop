@@ -14,7 +14,7 @@ on:
       - 'packaging/**'
       - '.github/workflows/packaging.yml'
       - 'scripts/measure-agent.sh'
-  # A release: build the packages from main to publish with Publish Linux Packages.
+  # A release: build the packages from main, then publish this run's artifacts (decision 0074).
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,7 +23,7 @@ jobs:
     # Each architecture builds natively on Debian 12 (bookworm), the oldest distribution the
     # package supports, so dpkg-shlibdeps reads the real binary and the package runs on
     # Debian 12 and 13, Raspberry Pi OS and Ubuntu 24.04 and later. The packages are the
-    # artifacts Publish Linux Packages publishes.
+    # artifacts a release publishes.
     name: .deb ${{ matrix.arch }} (Debian/Ubuntu)
     runs-on: ${{ matrix.runner }}
     container: debian:bookworm
