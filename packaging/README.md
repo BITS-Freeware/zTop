@@ -8,7 +8,8 @@ service; tokens paired before the change keep their read-only rights —
 pair again afterwards to hold the `control` right (decision 0042).
 
 Both point at `/usr/local/bin/ztop`; change it to wherever your
-package manager installed the binary.
+package manager installed the binary. The `.deb` (below) ships its
+own copy of the systemd unit, pointed at `/usr/bin/ztop`.
 
 ## macOS (launchd, per user)
 
@@ -48,3 +49,51 @@ token paired with `--allow-manage`; the shipped services do not pass
 it, so no client paired through them can list or revoke tokens. To
 manage tokens, stop the service and run `ztop agent --tls --pair
 --allow-manage` once by hand to pair your own client.
+
+## Debian and Ubuntu (apt)
+
+    curl -fsSL https://downloads.bristleconeit.com/ztop/install.sh | sh
+
+The installer ([linux/install.sh](linux/install.sh)) downloads the
+package for this machine (amd64 or arm64), checks its SHA-256, and
+installs it with apt. The package adds zTop's signed apt repository
+(`/etc/apt/sources.list.d/ztop.sources`, signed by the key in
+[linux/ztop-archive-keyring.asc](linux/ztop-archive-keyring.asc)), so
+`sudo apt upgrade` installs later versions. It runs on Debian 12 and 13,
+Raspberry Pi OS (64-bit, bookworm and later) and Ubuntu 24.04 and later.
+
+The package installs `/usr/bin/ztop`, the man page, and the agent as a
+user service that stays off until you turn it on:
+
+    systemctl --user enable --now ztop-agent
+
+To add the repository by hand instead:
+
+    curl -fsSL https://downloads.bristleconeit.com/ztop/apt/ztop-archive-keyring.asc \
+        | sudo gpg --dearmor -o /usr/share/keyrings/ztop-archive-keyring.gpg
+    sudo cp packaging/linux/ztop.sources /etc/apt/sources.list.d/
+    sudo apt update && sudo apt install ztop
+
+The repository is signed with the "Bristlecone IT Services apt signing"
+key (Ed25519, fingerprint `95AC 000B 4F4D 70F2 4276  DA2A 768E E42A 6FCB
+ED6D`, expires 2029-11-08).
+
+### Building and releasing
+
+- `packaging/build-deb.sh` builds `dist/ztop_<version>-<build>_<arch>.deb`
+  for this machine's architecture, on Linux. The build number is the
+  commit count.
+- `packaging/check-deb.sh dist/ztop_*.deb` (as root, on a disposable
+  machine) checks the package's contents, installs it with the one-line
+  installer from a local copy of the downloads site, and upgrades it
+  through a repository signed with a throwaway key. The Packaging
+  workflow runs both on Debian 12 for amd64 and arm64 and keeps the
+  packages as the `ztop-linux-amd64` and `ztop-linux-arm64` artifacts.
+- **Publish Linux Packages** (`.github/workflows/publish-linux.yml`),
+  run by hand from main with a Packaging run's number, signs the
+  repository with `packaging/build-apt-repo.sh` and uploads it, the
+  latest links and the installer. Its secrets live in the `apt-publish`
+  environment, which only main can deploy to: `APT_SIGNING_KEY` (the
+  signing subkey only), `APT_SIGNING_KEY_PASSPHRASE`, `R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT` and `R2_BUCKET`. Try it first
+  with `dry_run`.

@@ -11,6 +11,8 @@ Updated after every working session.
 
 Newest first. One or two lines per session: what changed, what is next.
 
+- 2026-11-19 (apt): The `.deb` now installs into `/usr`, builds natively on Debian 12 for amd64 and arm64, adds zTop's signed apt repository, and installs with a one-line installer; Publish Linux Packages publishes a Packaging run to downloads.bristleconeit.com/ztop (decision 0065). `packaging/check-deb.sh` tests the installer and a signed upgrade in CI. Next: the `apt-publish` environment's secrets, a dry run, then the first apt release.
+
 - 2026-11-18 (audit): Fixed the audit findings, regression test first for each. Tracer requests all come from the tracer thread, so closing a trace detaches (0060). Control refuses pid 0, group pids and signals outside the catalog; token listing and revoking need the new `manage` right; pairing codes are eight symbols, burned by five wrong guesses and spaced a second apart; launchd logs leave /tmp (0061). The hub prunes past 24 h, stores history without process lists and caps windows at an hour (0062). The live Linux collector reads command lines, finds mounted disks by their diskstats name and keeps core numbers across offline cores (0063). One accept loop with deadlines and a connection cap serves the agent and the hub (0064). Next: merge, then the full-hour budget run.
 
 - 2026-11-18: First public release here. The app moved to its own repository; the history ring now drops process lists (regression test `the_history_ring_drops_process_lists_but_the_latest_keeps_them`); a 120 s Linux measurement stays within budget (under 1% CPU, 9 MB). The earlier macOS runs on a loaded host (1.4-1.6% CPU, 33-48 MB and growing) predate this fix. Next: a full-hour budget run on macOS and Linux.

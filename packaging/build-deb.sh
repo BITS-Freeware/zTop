@@ -1,123 +1,108 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# Build .deb packages for zTop (amd64 and arm64).
+# Builds zTop for Linux as a Debian package for this machine's architecture.
 #
-# Usage:
-#     ./build-deb.sh [version]
+#   packaging/build-deb.sh [--build N] [--out DIR] [--skip-build]
 #
-# The script builds the ztop binary for the target architecture and
-# packages it into a .deb file with a systemd user service.
-
+# Writes DIR/ztop_<version>-<build>_<arch>.deb (default DIR: dist) and a .sha256 beside it.
+# The version comes from the workspace Cargo.toml; the build number defaults to the commit
+# count, so every build from main has a newer package version than the one before. With
+# --skip-build it packages the release binary already in target/ (to make a second build
+# number from the same binary, as the upgrade checks do).
+#
+# Build on the oldest distribution you want to support: the package needs that distribution's
+# C library or newer. CI builds on Debian 12 (bookworm), which covers Debian 12 and 13,
+# Raspberry Pi OS (bookworm and later), and Ubuntu 24.04 and later. CI builds each
+# architecture natively, so dpkg-shlibdeps can read the binary.
+#
+# The package installs the apt repository it is published in (packaging/linux/ztop.sources)
+# and the public key that signs it, so `apt upgrade` installs later versions.
 set -euo pipefail
-
-VERSION="${1:-0.1.0}"
-ARCH="${2:-amd64}"
-BUILD_DIR="$(mktemp -d)"
-PACKAGE_NAME="ztop"
-MAINTAINER="zTop Maintainers <maintainers@ztop.dev>"
-DESCRIPTION="A lightweight system monitor for macOS and Linux"
-
-echo "Building zTop ${VERSION} for ${ARCH}..."
-
-# Determine the Rust target triple
-case "$ARCH" in
-    amd64)
-        TARGET="x86_64-unknown-linux-gnu"
-        ;;
-    arm64)
-        TARGET="aarch64-unknown-linux-gnu"
-        ;;
-    *)
-        echo "Unknown architecture: $ARCH"
-        exit 1
-        ;;
-esac
-
-# Build the binary
 cd "$(dirname "$0")/.."
-cargo build --release --target "$TARGET"
 
-# Create the package structure
-PKG_DIR="$BUILD_DIR/${PACKAGE_NAME}_${VERSION}_${ARCH}"
-mkdir -p "$PKG_DIR/DEBIAN"
-mkdir -p "$PKG_DIR/usr/local/bin"
-mkdir -p "$PKG_DIR/usr/local/lib/ztop"
-mkdir -p "$PKG_DIR/lib/systemd/user"
-mkdir -p "$PKG_DIR/usr/local/share/man/man1"
+usage() { sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+BUILD=""; OUT="dist"; SKIP_BUILD=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --build) BUILD="$2"; shift 2 ;;
+    --out) OUT="$2"; shift 2 ;;
+    --skip-build) SKIP_BUILD=1; shift ;;
+    -h|--help) usage ;;
+    *) echo "Unknown option $1" >&2; usage ;;
+  esac
+done
+[ "$(uname)" = "Linux" ] || { echo "build-deb.sh runs on Linux." >&2; exit 1; }
+for tool in dpkg-deb dpkg-shlibdeps gpg; do
+  command -v "$tool" >/dev/null || { echo "$tool is missing: apt install dpkg-dev gnupg" >&2; exit 1; }
+done
 
-# Copy the binary
-cp "target/${TARGET}/release/ztop" "$PKG_DIR/usr/local/bin/ztop"
-chmod 755 "$PKG_DIR/usr/local/bin/ztop"
+VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+[ -n "$VERSION" ] || { echo "No version in Cargo.toml's [workspace.package]" >&2; exit 1; }
+if [ -z "$BUILD" ]; then
+  BUILD="$(git rev-list --count HEAD 2>/dev/null)" || { echo "Not a git checkout; give --build N" >&2; exit 1; }
+fi
+case "$BUILD" in ''|*[!0-9]*) echo "--build must be a number" >&2; exit 2 ;; esac
+ARCH="$(dpkg --print-architecture)"
+PACKAGE_VERSION="$VERSION-$BUILD"
 
-# Copy the systemd service
-cp "packaging/systemd/ztop-agent.service" "$PKG_DIR/lib/systemd/user/ztop-agent.service"
-chmod 644 "$PKG_DIR/lib/systemd/user/ztop-agent.service"
+if [ "$SKIP_BUILD" -eq 0 ]; then
+  cargo build --release --locked -p ztop
+fi
+BIN="target/release/ztop"
+[ -x "$BIN" ] || { echo "No release ztop at $BIN" >&2; exit 1; }
 
-# Copy the man page
-cp "packaging/man/ztop.1" "$PKG_DIR/usr/local/share/man/man1/ztop.1"
-chmod 644 "$PKG_DIR/usr/local/share/man/man1/ztop.1"
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+ROOT="$WORK/root"
+L=packaging/linux
+install -d "$ROOT/DEBIAN" "$ROOT/usr/bin" "$ROOT/usr/lib/systemd/user" "$ROOT/usr/share/man/man1" \
+  "$ROOT/usr/share/doc/ztop" "$ROOT/usr/share/keyrings" "$ROOT/etc/apt/sources.list.d"
+install -m 755 "$BIN" "$ROOT/usr/bin/ztop"
+strip --strip-unneeded "$ROOT/usr/bin/ztop"
+# The shipped unit names /usr/local/bin for people who install the binary by hand; the
+# package puts it in /usr/bin.
+sed 's|/usr/local/bin/ztop|/usr/bin/ztop|g' packaging/systemd/ztop-agent.service > "$ROOT/usr/lib/systemd/user/ztop-agent.service"
+chmod 644 "$ROOT/usr/lib/systemd/user/ztop-agent.service"
+grep -q '^ExecStart=/usr/bin/ztop ' "$ROOT/usr/lib/systemd/user/ztop-agent.service" \
+  || { echo "The packaged unit doesn't start /usr/bin/ztop" >&2; exit 1; }
+gzip -9n < packaging/man/ztop.1 > "$ROOT/usr/share/man/man1/ztop.1.gz"
+chmod 644 "$ROOT/usr/share/man/man1/ztop.1.gz"
+install -m 644 "$L/copyright" "$ROOT/usr/share/doc/ztop/copyright"
+install -m 755 "$L/debian/postinst" "$ROOT/DEBIAN/postinst"
 
-# Create the control file
-cat > "$PKG_DIR/DEBIAN/control" << EOF
-Package: ${PACKAGE_NAME}
-Version: ${VERSION}
-Architecture: ${ARCH}
-Maintainer: ${MAINTAINER}
-Description: ${DESCRIPTION}
+KEYRING="$L/ztop-archive-keyring.asc"
+[ -f "$KEYRING" ] || { echo "No $KEYRING: the public key that signs zTop's apt repository" >&2; exit 1; }
+gpg --dearmor < "$KEYRING" > "$ROOT/usr/share/keyrings/ztop-archive-keyring.gpg"
+chmod 644 "$ROOT/usr/share/keyrings/ztop-archive-keyring.gpg"
+install -m 644 "$L/ztop.sources" "$ROOT/etc/apt/sources.list.d/ztop.sources"
+printf '%s\n' /etc/apt/sources.list.d/ztop.sources > "$ROOT/DEBIAN/conffiles"
+
+# The shared libraries ztop links, as package names and versions.
+mkdir -p "$WORK/shlibs/debian"
+printf 'Source: ztop\n\nPackage: ztop\nArchitecture: any\n' > "$WORK/shlibs/debian/control"
+SHLIBS="$(cd "$WORK/shlibs" && dpkg-shlibdeps -O "$ROOT/usr/bin/ztop" 2>/dev/null | sed -n 's/^shlibs:Depends=//p')"
+[ -n "$SHLIBS" ] || { echo "dpkg-shlibdeps found no libraries for ztop" >&2; exit 1; }
+
+SIZE="$(du -sk --exclude=DEBIAN "$ROOT" | cut -f1)"
+cat > "$ROOT/DEBIAN/control" <<CONTROL
+Package: ztop
+Version: $PACKAGE_VERSION
+Architecture: $ARCH
+Maintainer: Bristlecone IT Services
+Installed-Size: $SIZE
+Depends: $SHLIBS
 Section: utils
 Priority: optional
-Depends: libc6
-EOF
+Homepage: https://github.com/BITS-Freeware/zTop
+Description: resource monitor for Macs and Linux machines, alone or as a fleet
+ ztop is an interactive terminal monitor for processes, CPU, memory, disks,
+ network, temperatures and GPUs. Run "ztop agent" and it serves the same
+ metrics over pinned TLS with pairing, for the zTop app, a hub or another
+ ztop; run "ztop hub" and one machine collects from every agent.
+CONTROL
 
-# Create the postinst script
-cat > "$PKG_DIR/DEBIAN/postinst" << 'EOF'
-#!/bin/bash
-# Create the dedicated ztop user if it doesn't exist. Best-effort:
-# the binary runs fine as any user, so a failure here (for example on
-# a CI runner whose useradd or nologin path differs) must not break the
-# package install.
-if ! id ztop &> /dev/null; then
-    useradd --system --create-home --shell /usr/sbin/nologin ztop || \
-        echo "warning: could not create the ztop user; ztop still runs as any user" >&2
-fi
-
-# Enable the systemd user service. Best-effort: headless machines
-# (and CI) have no user bus, and the unit can be enabled later with
-# `systemctl --user enable ztop-agent.service`.
-if command -v systemctl &> /dev/null; then
-    systemctl --user daemon-reload || true
-    systemctl --user enable ztop-agent.service || true
-fi
-EOF
-chmod 755 "$PKG_DIR/DEBIAN/postinst"
-
-# Create the postrm script
-cat > "$PKG_DIR/DEBIAN/postrm" << 'EOF'
-#!/bin/bash
-# Remove the dedicated ztop user if it exists
-if [ "$1" = "purge" ] && id ztop &> /dev/null; then
-    userdel ztop 2>/dev/null || true
-    rm -rf /home/ztop 2>/dev/null || true
-fi
-EOF
-chmod 755 "$PKG_DIR/DEBIAN/postrm"
-
-# Create the prerm script
-cat > "$PKG_DIR/DEBIAN/prerm" << 'EOF'
-#!/bin/bash
-# Stop the systemd user service
-if command -v systemctl &> /dev/null; then
-    systemctl --user stop ztop-agent.service 2>/dev/null || true
-    systemctl --user disable ztop-agent.service 2>/dev/null || true
-fi
-EOF
-chmod 755 "$PKG_DIR/DEBIAN/prerm"
-
-# Build the .deb package in the repository root
-dpkg-deb --build "$PKG_DIR" "${PACKAGE_NAME}_${VERSION}_${ARCH}.deb"
-
-echo "Built: ${PACKAGE_NAME}_${VERSION}_${ARCH}.deb"
-
-# Clean up the staging directory (keep the .deb)
-rm -rf "$PKG_DIR"
+mkdir -p "$OUT"
+DEB="$OUT/ztop_${PACKAGE_VERSION}_${ARCH}.deb"
+dpkg-deb --root-owner-group -Zxz --build "$ROOT" "$DEB" >/dev/null
+(cd "$OUT" && sha256sum "$(basename "$DEB")" > "$(basename "$DEB").sha256")
+echo "$DEB"

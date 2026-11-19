@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT OR Apache-2.0
+set -e
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+  # A first install. The agent is a per-person user service and stays off until a person
+  # turns it on, because it serves that person's view of this machine.
+  echo "ztop is installed. Run ztop for the monitor."
+  echo "To serve this machine to the zTop app or a hub: systemctl --user enable --now ztop-agent"
+fi
+exit 0
