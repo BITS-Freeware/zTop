@@ -120,9 +120,13 @@ impl Store {
     /// embedded migrations. WAL keeps a poll and a reader from
     /// blocking each other.
     pub async fn open(path: &Path) -> Result<Store, sqlx::Error> {
+        // The history holds every agent's samples: the directory is
+        // 0700 and the database 0600 before SQLite opens it, and SQLite
+        // gives its -wal and -shm files the database's mode (audit M6).
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            ztop_core::paths::create_private_dir(parent)?;
         }
+        make_private_file(path)?;
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -215,6 +219,28 @@ impl Store {
             .await?;
         Ok(())
     }
+}
+
+/// Create `path` empty with mode 0600 if it is missing, and take group
+/// and other access away if it exists with them.
+fn make_private_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Milliseconds since the Unix epoch; the timestamp every sample and
@@ -828,6 +854,28 @@ mod tests {
         )
         .expect("parses");
         assert!(good.validate().is_ok());
+    }
+
+    /// Regression (audit M6): the history database was created with the
+    /// default umask while holding every agent's samples.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_history_file_and_its_directory_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ztop-hub-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("hub").join("history.db");
+        let store = Store::open(&db).await.expect("opens");
+        store.insert("host-a", 1, 1, "{}").await.expect("insert");
+        let mode =
+            |path: &Path| std::fs::metadata(path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode(&dir.join("hub")), 0o700);
+        for entry in std::fs::read_dir(dir.join("hub")).expect("list") {
+            let path = entry.expect("entry").path();
+            assert_eq!(mode(&path) & 0o077, 0, "{}", path.display());
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

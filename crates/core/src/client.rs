@@ -414,7 +414,7 @@ const PAIR_TIMEOUT: Duration = Duration::from_secs(3);
 pub fn save_host_token(dir: &Path, host: &str, pin: &str, token: &str) -> std::io::Result<()> {
     let file = host_file(dir, host);
     if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::paths::create_private_dir(parent)?;
     }
     let record = serde_json::json!({ "host": host, "pin": pin, "token": token });
     use std::os::unix::fs::OpenOptionsExt;
