@@ -24,4 +24,4 @@ thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "sync", "time"] }
 tokio-rustls = { workspace = true }
-ztop-core = { path = "../core", version = "0.1.0" }
+ztop-core = { path = "../core", version = "0.1.1" }
