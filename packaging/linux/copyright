@@ -1,0 +1,15 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: zTop
+Source: https://github.com/BITS-Freeware/zTop
+
+Files: *
+Copyright: 2026 The zTop Authors
+License: MIT or Apache-2.0
+ zTop is licensed under either of the Apache License, Version 2.0, or the
+ MIT license, at your option. The full texts are LICENSE-APACHE and
+ LICENSE-MIT in the source repository; the Apache License is also in
+ /usr/share/common-licenses/Apache-2.0.
+ .
+ The ztop binary links in Rust crates under their own permissive licenses
+ (MIT, Apache-2.0, BSD, ISC, Unicode-3.0 and Zlib); cargo-deny checks every one of
+ them against deny.toml in the source repository.

@@ -70,6 +70,11 @@ run packaging sh -c '
         exit 1
     fi
     test -f packaging/man/ztop.1
+    # The Linux package: the one-line installer is plain sh, and the
+    # apt repository the package adds is the one the workflow publishes.
+    sh -n packaging/linux/install.sh
+    grep -q "^URIs: https://downloads.bristleconeit.com/ztop/apt$" packaging/linux/ztop.sources
+    grep -q "BEGIN PGP PUBLIC KEY BLOCK" packaging/linux/ztop-archive-keyring.asc
     if command -v plutil >/dev/null 2>&1; then
         plutil -lint packaging/launchd/com.ztop.agent.plist
     fi

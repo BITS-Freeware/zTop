@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **apt**: a one-line installer for Debian, Ubuntu and Raspberry Pi OS (`curl -fsSL https://downloads.bristleconeit.com/ztop/install.sh | sh`) and a signed apt repository, so `sudo apt upgrade` keeps ztop current (decision 0065).
+
+### Changed
+
+- The `.deb` installs into `/usr` instead of `/usr/local`, is built natively on Debian 12 for amd64 and arm64, and no longer creates a `ztop` system user or enables the agent at install; turn the agent on with `systemctl --user enable --now ztop-agent`.
+
 ## [0.1.0] - 2026-11-18
 
 First public release.
