@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- The syscall tracer releases the traced process on close, and every ptrace request comes from one thread.
+- Control refuses pid 0, group pids and signals outside the catalog; listing and revoking tokens needs the new `manage` right; pairing codes are eight symbols, burned by five wrong guesses and spaced a second apart.
+- The agent and the hub keep serving through failed accepts, with deadlines for the TLS handshake, the request head and the answer, and a connection cap.
+- The protocol client parses responses as bytes (a crafted response could panic it), reads at most 32 MiB, and gives each fetch one overall deadline.
+- Agent history answers cover at most an hour, and at most two are built at once.
+- The TLS key, the state directory and the hub's history database are private (0600 and 0700) from the moment they exist; the tokens file is written atomically, and a corrupt one is moved aside loudly instead of silently disabling persistence.
+- The hub's bundled SQLite moves past RUSTSEC-2026-0459 (sqlx 0.9), and CI now checks advisories.
+
+### Fixed
+
+- Hub retention deletes rows past a day, history no longer stores process lists, and windows, pruning and the latest sample go by the hub's own clock.
+- The live Linux collector reads command lines, finds mounted disks, survives offline CPUs and reads only the sensor and battery files it uses.
+- A failed mDNS start no longer crashes the agent.
+- The .deb installs under `/usr`, runs the agent as a sandboxed system service for the `ztop` user, and removes only what it created.
+
 ## [0.1.0] - 2026-11-18
 
 First public release.

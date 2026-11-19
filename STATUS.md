@@ -3,13 +3,15 @@
 Updated after every working session.
 
 - **Current milestone:** 0.1.0, first public release from this repository.
-- **Last done:** Fixed the findings of a security and correctness audit in five pull requests: the syscall tracer (decision 0060), auth and control (0061), hub retention (0062), the live Linux collector (0063), and serving that survives the network (0064).
-- **Next step:** merge the five audit fixes, then measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
+- **Last done:** Fixed the audit's nine medium findings (M1 to M9): protocol client limits (decision 0068), agent history limits (0069), the tokens file written whole (0070), the hub on its own clock (0071), private state from creation (0072), the .deb as a system service for the `ztop` user (0073), and advisories in CI with sqlx 0.9 (0074); plus no crash on a failed mDNS start and leaner Linux sensor reads.
+- **Next step:** measure the agent's budget over a full hour on a busy macOS and Linux host (many sensors and threads, for M9), and record it; then the audit's low findings.
 - **Blocked on:** nothing.
 
 ## Log
 
 Newest first. One or two lines per session: what changed, what is next.
+
+- 2026-11-19 (audit, medium): Fixed M1 to M9, regression test first for each. The client parses bytes, caps responses at 32 MiB and gives a fetch one deadline, and the TUI restores the terminal on panic (0068; new fuzz target `parse_response`). Agent history is capped at an hour with two answers in flight (0069). Tokens are saved through a temporary file; a corrupt file is moved aside loudly (0070). Hub rows carry the hub's receive time (0071). Directories 0700, key and database 0600 at creation (0072). The .deb runs a sandboxed system unit as `ztop` under `/usr` (0073). sqlx 0.9 clears RUSTSEC-2026-0459 and CI checks advisories (0074). mDNS failures skip advertising; Linux reads only the sensor files it parses. Next: the full-hour budget run.
 
 - 2026-11-18 (audit): Fixed the audit findings, regression test first for each. Tracer requests all come from the tracer thread, so closing a trace detaches (0060). Control refuses pid 0, group pids and signals outside the catalog; token listing and revoking need the new `manage` right; pairing codes are eight symbols, burned by five wrong guesses and spaced a second apart; launchd logs leave /tmp (0061). The hub prunes past 24 h, stores history without process lists and caps windows at an hour (0062). The live Linux collector reads command lines, finds mounted disks by their diskstats name and keeps core numbers across offline cores (0063). One accept loop with deadlines and a connection cap serves the agent and the hub (0064). Next: merge, then the full-hour budget run.
 
