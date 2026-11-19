@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Servers**: the `.deb` ships a system service, `ztop-agent.service`, off until enabled. It runs the agent as the unprivileged `ztop` user with TLS, keeps its certificate and tokens in `/var/lib/ztop`, binds the address in `/etc/default/ztop-agent` (loopback by default), starts after a private network such as Tailscale, and never pairs or grants control. `/usr/lib/ztop/pair-system-agent` pairs one read-only client over loopback (decision 0066).
+
 ## [0.1.1] - 2026-11-19
 
 ### Added
