@@ -63,9 +63,32 @@ installs it with apt. The package adds zTop's signed apt repository
 Raspberry Pi OS (64-bit, bookworm and later) and Ubuntu 24.04 and later.
 
 The package installs `/usr/bin/ztop`, the man page, and the agent as a
-user service that stays off until you turn it on:
+user service and a system service (below), both off until you turn one
+on. On a desktop:
 
     systemctl --user enable --now ztop-agent
+
+### Servers (systemd, system-wide)
+
+A server with nobody logged in uses the system service instead, also
+installed by the package and off until you turn it on. It runs as the
+unprivileged `ztop` user, keeps its certificate and tokens in
+`/var/lib/ztop`, and never pairs, signals or renices (decision 0066):
+
+    # 1. The address to serve: a private network's address on this machine.
+    echo 'ZTOP_AGENT_ARGS="--bind 100.64.0.10"' | sudo tee /etc/default/ztop-agent
+    # 2. Pair a client; prints {"pin":"SHA256:...","token":"..."}.
+    sudo /usr/lib/ztop/pair-system-agent
+    # 3. Start it, now and at boot.
+    sudo systemctl enable --now ztop-agent
+
+The pairing helper trades the code over loopback, so it never reaches
+the journal or the network. Give the pin and token to the client, such
+as one entry in a hub's agents file. The unit starts after
+`tailscaled` when Tailscale is installed, and retries every five
+seconds until the address it binds exists.
+[linux/README.server](linux/README.server), installed as
+`/usr/share/doc/ztop/README.server`, has the rest.
 
 To add the repository by hand instead:
 

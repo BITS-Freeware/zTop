@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT OR Apache-2.0
+set -e
+if [ "$1" = "purge" ]; then
+  # The system agent's certificate and token hashes. The ztop user stays, as Debian keeps
+  # system users after a purge so no later account reuses its id.
+  rm -rf /var/lib/ztop
+  rm -f /etc/systemd/system/multi-user.target.wants/ztop-agent.service
+fi
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+exit 0

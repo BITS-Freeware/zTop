@@ -1,0 +1,10 @@
+# Options for the zTop system agent (ztop-agent.service), read when it starts.
+#
+# The agent serves TLS on 127.0.0.1 unless this names another address. To serve
+# a private network, bind that network's address on this machine, for example:
+#
+#     ZTOP_AGENT_ARGS="--bind 100.64.0.10"
+#
+# Then `sudo systemctl restart ztop-agent`. --pair, --allow-control and
+# --allow-manage don't belong here: see /usr/share/doc/ztop/README.server.
+ZTOP_AGENT_ARGS=""

@@ -14,10 +14,10 @@
 //! dir so a later connect re-pins without re-pairing.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::Digest;
 
@@ -43,7 +43,8 @@ const CONTROL_PATH: &str = "/v1/control";
 pub struct RemoteCollector {
     /// The `host:port` to connect to.
     target: String,
-    /// Read/write timeout for one fetch.
+    /// The whole budget for one fetch: connect, handshake, request and
+    /// response together.
     timeout: Duration,
     /// The pinned TLS configuration; `None` speaks plain HTTP.
     tls: Option<Arc<rustls::ClientConfig>>,
@@ -198,14 +199,7 @@ fn https_post(
     })?;
     let mut stream = rustls::StreamOwned::new(
         rustls::ClientConnection::new(config.clone(), name).map_err(tls_error)?,
-        {
-            let tcp = TcpStream::connect(target).map_err(CollectError::Io)?;
-            tcp.set_read_timeout(Some(timeout))
-                .map_err(CollectError::Io)?;
-            tcp.set_write_timeout(Some(timeout))
-                .map_err(CollectError::Io)?;
-            tcp
-        },
+        Deadlined::connect(target, timeout)?,
     );
     exchange(&mut stream, "POST", target, path, Some(body), token)
 }
@@ -377,14 +371,7 @@ fn https_get(
     })?;
     let mut stream = rustls::StreamOwned::new(
         rustls::ClientConnection::new(config.clone(), name).map_err(tls_error)?,
-        {
-            let tcp = TcpStream::connect(target).map_err(CollectError::Io)?;
-            tcp.set_read_timeout(Some(timeout))
-                .map_err(CollectError::Io)?;
-            tcp.set_write_timeout(Some(timeout))
-                .map_err(CollectError::Io)?;
-            tcp
-        },
+        Deadlined::connect(target, timeout)?,
     );
     exchange(&mut stream, "GET", target, path, None, token)
 }
@@ -427,7 +414,7 @@ const PAIR_TIMEOUT: Duration = Duration::from_secs(3);
 pub fn save_host_token(dir: &Path, host: &str, pin: &str, token: &str) -> std::io::Result<()> {
     let file = host_file(dir, host);
     if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::paths::create_private_dir(parent)?;
     }
     let record = serde_json::json!({ "host": host, "pin": pin, "token": token });
     use std::os::unix::fs::OpenOptionsExt;
@@ -470,6 +457,86 @@ fn host_file(dir: &Path, host: &str) -> PathBuf {
     dir.join("hosts").join(format!("{safe}.json"))
 }
 
+/// The largest response the client reads, headers included. The biggest
+/// real answer is a full hour of history (decision 0062 keeps process
+/// lists out of it), well under this; anything larger is a broken or
+/// hostile server, and reading on would only grow memory without bound.
+pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+/// A socket with one overall deadline. Each read and write gets only the
+/// time left until the deadline, so a server that drips one byte per
+/// timeout cannot keep a fetch alive forever; the per-operation timeouts
+/// alone would reset on every byte.
+#[derive(Debug)]
+struct Deadlined {
+    tcp: TcpStream,
+    deadline: Instant,
+}
+
+impl Deadlined {
+    /// Connect to `target` within `timeout`, trying each address it
+    /// resolves to with the time that is left. The same deadline then
+    /// bounds the rest of the exchange.
+    fn connect(target: &str, timeout: Duration) -> Result<Self, CollectError> {
+        let deadline = Instant::now() + timeout;
+        let mut last = None;
+        for addr in target.to_socket_addrs().map_err(CollectError::Io)? {
+            let left = time_left(deadline).map_err(CollectError::Io)?;
+            match TcpStream::connect_timeout(&addr, left) {
+                Ok(tcp) => return Ok(Self { tcp, deadline }),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(CollectError::Io(last.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the target resolves to no address",
+            )
+        })))
+    }
+
+    /// Wrap an already connected socket (tests use it).
+    #[cfg(test)]
+    fn wrap(tcp: TcpStream, timeout: Duration) -> Self {
+        Self {
+            tcp,
+            deadline: Instant::now() + timeout,
+        }
+    }
+}
+
+/// The time left until `deadline`, or a timeout error once it passed.
+fn time_left(deadline: Instant) -> std::io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the agent took longer than the timeout",
+        ))
+    } else {
+        Ok(left)
+    }
+}
+
+impl Read for Deadlined {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.tcp.set_read_timeout(Some(time_left(self.deadline)?))?;
+        self.tcp.read(buf)
+    }
+}
+
+impl Write for Deadlined {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.tcp
+            .set_write_timeout(Some(time_left(self.deadline)?))?;
+        self.tcp.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.tcp.flush()
+    }
+}
+
 /// One HTTP/1.1 GET against `host:port`, returning the body text.
 ///
 /// Handles the two response shapes a small server produces: the body
@@ -477,13 +544,7 @@ fn host_file(dir: &Path, host: &str) -> PathBuf {
 /// `chunked`. Anything else — no body, a redirect, a compressed body —
 /// is an error, never a guess.
 fn http_get(target: &str, path: &str, timeout: Duration) -> Result<String, CollectError> {
-    let mut stream = TcpStream::connect(target).map_err(CollectError::Io)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(CollectError::Io)?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(CollectError::Io)?;
+    let mut stream = Deadlined::connect(target, timeout)?;
     let (status, text) = exchange(&mut stream, "GET", target, path, None, None)?;
     if status >= 400 {
         return Err(CollectError::Unavailable {
@@ -494,10 +555,10 @@ fn http_get(target: &str, path: &str, timeout: Duration) -> Result<String, Colle
     Ok(text)
 }
 
-/// Write one request, read the whole response, and return the status
-/// with the body. Works for any stream that reads and writes bytes:
-/// a plain `TcpStream` or a TLS session over one. Timeouts belong to
-/// the socket and are set by the caller before the stream arrives.
+/// Write one request, read the whole response (at most
+/// [`MAX_RESPONSE_BYTES`]), and return the status with the body. Works
+/// for any stream that reads and writes bytes: a plain socket or a TLS
+/// session over one. The deadline belongs to the socket underneath.
 fn exchange<S: Read + Write>(
     stream: &mut S,
     method: &str,
@@ -529,18 +590,34 @@ fn exchange<S: Read + Write>(
     // socket flushes immediately, so this is a no-op there.
     stream.flush().map_err(CollectError::Io)?;
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(CollectError::Io)?;
-
-    let text = String::from_utf8(raw).map_err(|_| CollectError::Unavailable {
-        origin: "agent",
-        what: "a text HTTP response",
-    })?;
-    let (head, rest) = text
-        .split_once("\r\n\r\n")
-        .ok_or(CollectError::Unavailable {
+    Read::take(&mut *stream, MAX_RESPONSE_BYTES as u64 + 1)
+        .read_to_end(&mut raw)
+        .map_err(CollectError::Io)?;
+    if raw.len() > MAX_RESPONSE_BYTES {
+        return Err(CollectError::Unavailable {
             origin: "agent",
-            what: "a complete HTTP response",
-        })?;
+            what: "a response of a sane size",
+        });
+    }
+    parse_response(&raw)
+}
+
+/// Split one complete HTTP/1.1 response into its status and body text.
+///
+/// Works on bytes throughout: every length the server announces counts
+/// bytes, so the body is cut as bytes and only then checked as UTF-8. A
+/// malformed response of any shape is an error, never a panic (the
+/// `parse_response` fuzz target holds it to that).
+pub fn parse_response(raw: &[u8]) -> Result<(u16, String), CollectError> {
+    let split = find(raw, b"\r\n\r\n").ok_or(CollectError::Unavailable {
+        origin: "agent",
+        what: "a complete HTTP response",
+    })?;
+    let head = std::str::from_utf8(&raw[..split]).map_err(|_| CollectError::Unavailable {
+        origin: "agent",
+        what: "text HTTP headers",
+    })?;
+    let rest = &raw[split + 4..];
     let mut lines = head.split("\r\n");
     let status_line = lines.next().unwrap_or_default();
     let status = status_line
@@ -565,49 +642,64 @@ fn exchange<S: Read + Write>(
         match length {
             // Exactly the announced bytes: the connection may have shut
             // down cleanly, so a short read is an error, not EOF.
-            Some(length) if rest.len() >= length => rest[..length].to_string(),
-            Some(_) => {
-                return Err(CollectError::Unavailable {
+            Some(length) => rest
+                .get(..length)
+                .ok_or(CollectError::Unavailable {
                     origin: "agent",
                     what: "a complete response body",
-                });
-            }
+                })?
+                .to_vec(),
             // No Content-Length: with `Connection: close` the body is
             // everything up to the end of the stream.
-            None => rest.to_string(),
+            None => rest.to_vec(),
         }
     };
+    let body = String::from_utf8(body).map_err(|_| CollectError::Unavailable {
+        origin: "agent",
+        what: "a text response body",
+    })?;
     Ok((status, body))
+}
+
+/// The first position of `needle` in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// Undo `Transfer-Encoding: chunked`: a run of `size`-hex lines, each
 /// followed by that many bytes, until a zero-size chunk.
-fn dechunk(body: &str) -> Result<String, CollectError> {
-    let mut out = String::new();
+fn dechunk(body: &[u8]) -> Result<Vec<u8>, CollectError> {
+    let mut out = Vec::new();
     let mut rest = body;
     loop {
-        let (size_line, after) = rest.split_once("\r\n").ok_or(CollectError::Unavailable {
+        let line_end = find(rest, b"\r\n").ok_or(CollectError::Unavailable {
             origin: "agent",
             what: "a complete chunked response",
         })?;
+        let size_line =
+            std::str::from_utf8(&rest[..line_end]).map_err(|_| CollectError::Unavailable {
+                origin: "agent",
+                what: "a valid chunk size",
+            })?;
         let size =
             usize::from_str_radix(size_line.split(';').next().unwrap_or_default().trim(), 16)
                 .map_err(|_| CollectError::Unavailable {
                     origin: "agent",
                     what: "a valid chunk size",
                 })?;
+        let after = &rest[line_end + 2..];
         if size == 0 {
             return Ok(out);
         }
-        if after.len() < size {
-            return Err(CollectError::Unavailable {
-                origin: "agent",
-                what: "a complete chunked response",
-            });
-        }
-        out.push_str(&after[..size]);
+        let chunk = after.get(..size).ok_or(CollectError::Unavailable {
+            origin: "agent",
+            what: "a complete chunked response",
+        })?;
+        out.extend_from_slice(chunk);
         rest = &after[size..];
-        rest = rest.strip_prefix("\r\n").unwrap_or(rest);
+        rest = rest.strip_prefix(b"\r\n").unwrap_or(rest);
     }
 }
 
@@ -649,27 +741,115 @@ mod tests {
 
     #[test]
     fn a_content_length_response_yields_exactly_the_body() {
-        let (head, body) = RESPONSE.split_once("\r\n\r\n").expect("split");
-        let length: usize = head
-            .lines()
-            .find_map(|l| {
-                let (n, v) = l.split_once(':')?;
-                n.eq_ignore_ascii_case("content-length")
-                    .then(|| v.trim().parse().ok())?
-            })
-            .expect("length");
-        assert_eq!(&body[..length], "{\"protocol\": 1}");
+        let (status, body) = parse_response(RESPONSE.as_bytes()).expect("parses");
+        assert_eq!(status, 200);
+        assert_eq!(body, "{\"protocol\": 1}");
     }
 
     #[test]
     fn a_chunked_response_is_reassembled() {
-        let chunked = "4\r\n{\"pr\r\n4\r\notoc\r\n4\r\nol\"}\r\n0\r\n\r\n";
-        assert_eq!(dechunk(chunked).expect("dechunk"), "{\"protocol\"}");
+        let chunked = b"4\r\n{\"pr\r\n4\r\notoc\r\n4\r\nol\"}\r\n0\r\n\r\n";
+        assert_eq!(dechunk(chunked).expect("dechunk"), b"{\"protocol\"}");
     }
 
     #[test]
     fn a_truncated_chunk_is_an_error() {
-        assert!(dechunk("5\r\nshort\r\n").is_err());
+        assert!(dechunk(b"5\r\nshort\r\n").is_err());
+    }
+
+    /// Regression (audit M1): chunk sizes and Content-Length count
+    /// bytes, and slicing a `&str` at a byte count that lands inside a
+    /// character panicked ("end byte index 1 is not a char boundary").
+    #[test]
+    fn lengths_that_split_a_character_are_errors_not_panics() {
+        // A one-byte chunk holding the first byte of a two-byte "é".
+        let chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\né\r\n0\r\n\r\n";
+        assert!(parse_response(chunk.as_bytes()).is_err());
+        // The same with Content-Length.
+        let length = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\né";
+        assert!(parse_response(length.as_bytes()).is_err());
+        // Whole characters still come through, in chunks that split
+        // them across the chunk boundary.
+        let split = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n\u{c3}";
+        let mut raw = split.as_bytes().to_vec();
+        raw.truncate(raw.len() - 2); // drop the re-encoded U+00C3
+        raw.extend_from_slice(&[0xc3, b'\r', b'\n', b'1', b'\r', b'\n', 0xa9]);
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert_eq!(parse_response(&raw).expect("parses").1, "é");
+    }
+
+    /// A stream that answers forever and swallows every write.
+    struct Endless;
+
+    impl Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            buf.fill(b'a');
+            Ok(buf.len())
+        }
+    }
+
+    impl Write for Endless {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression (audit M1): the response was read with an unbounded
+    /// `read_to_end`, so a server that never stops sending grew the
+    /// client's memory until it died.
+    #[test]
+    fn a_response_past_the_cap_is_refused() {
+        let error = exchange(&mut Endless, "GET", "host-a:7100", "/", None, None)
+            .expect_err("an endless response cannot succeed");
+        assert!(error.to_string().contains("sane size"), "{error}");
+    }
+
+    /// Regression (audit M1): timeouts were per read, so a server that
+    /// sent one byte just inside each timeout kept the fetch open
+    /// forever. The deadline now covers the whole exchange.
+    #[test]
+    fn a_dripping_server_hits_the_overall_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("accepts");
+            let mut request = [0u8; 1024];
+            let _ = peer.read(&mut request);
+            for _ in 0..100 {
+                if peer.write_all(b"H").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let tcp = TcpStream::connect(addr).expect("connects");
+        let mut stream = Deadlined::wrap(tcp, Duration::from_millis(400));
+        let started = Instant::now();
+        let result = exchange(&mut stream, "GET", "host-a", "/", None, None);
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the drip outlived the deadline: {:?}",
+            started.elapsed()
+        );
+        drop(stream);
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn a_closed_port_fails_within_the_timeout() {
+        // Bind, learn the port, close it: nothing listens there now.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("binds")
+            .local_addr()
+            .expect("addr");
+        let started = Instant::now();
+        assert!(Deadlined::connect(&addr.to_string(), Duration::from_secs(1)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

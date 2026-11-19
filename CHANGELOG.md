@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- The protocol client parses responses as bytes (a crafted response could panic it), reads at most 32 MiB, and gives each fetch one overall deadline.
+- Agent history answers cover at most an hour, and at most two are built at once.
+- The TLS key, the state directory and the hub's history database are private (0600 and 0700) from the moment they exist; the tokens file is written atomically, and a corrupt one is moved aside loudly instead of silently disabling persistence.
+- The hub's bundled SQLite moves past RUSTSEC-2026-0459 (sqlx 0.9), and CI now checks advisories.
+
+### Fixed
+
+- The hub's windows, pruning and latest sample go by the hub's own clock.
+- The live Linux collector reads only the sensor and battery files it uses.
+- A failed mDNS start no longer crashes the agent.
+
+## [0.1.2] - 2026-11-19
+
+### Added
+
+- **Servers**: the `.deb` ships a system service, `ztop-agent.service`, off until enabled. It runs the agent as the unprivileged `ztop` user with TLS, keeps its certificate and tokens in `/var/lib/ztop`, binds the address in `/etc/default/ztop-agent` (loopback by default), starts after a private network such as Tailscale, and never pairs or grants control. `/usr/lib/ztop/pair-system-agent` pairs one read-only client over loopback (decision 0066).
+
 ## [0.1.1] - 2026-11-19
 
 ### Added

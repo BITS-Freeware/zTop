@@ -5,7 +5,7 @@ and the decision records in `docs/decisions/` carry the details.
 
 ## Prerequisites
 
-- Rust stable (edition 2024, so 1.85+).
+- Rust stable, 1.94 or newer (the hub's sqlx needs it).
 - Linux: nothing beyond Rust for the Rust parts.
 
 ## Build and check

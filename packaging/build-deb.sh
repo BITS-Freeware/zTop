@@ -55,8 +55,9 @@ BIN="target/release/ztop"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 ROOT="$WORK/root"
 L=packaging/linux
-install -d "$ROOT/DEBIAN" "$ROOT/usr/bin" "$ROOT/usr/lib/systemd/user" "$ROOT/usr/share/man/man1" \
-  "$ROOT/usr/share/doc/ztop" "$ROOT/usr/share/keyrings" "$ROOT/etc/apt/sources.list.d"
+install -d "$ROOT/DEBIAN" "$ROOT/usr/bin" "$ROOT/usr/lib/systemd/user" "$ROOT/usr/lib/systemd/system" \
+  "$ROOT/usr/lib/sysusers.d" "$ROOT/usr/lib/ztop" "$ROOT/usr/share/man/man1" "$ROOT/usr/share/doc/ztop" \
+  "$ROOT/usr/share/keyrings" "$ROOT/etc/apt/sources.list.d" "$ROOT/etc/default"
 install -m 755 "$BIN" "$ROOT/usr/bin/ztop"
 strip --strip-unneeded "$ROOT/usr/bin/ztop"
 # The shipped unit names /usr/local/bin for people who install the binary by hand; the
@@ -65,17 +66,28 @@ sed 's|/usr/local/bin/ztop|/usr/bin/ztop|g' packaging/systemd/ztop-agent.service
 chmod 644 "$ROOT/usr/lib/systemd/user/ztop-agent.service"
 grep -q '^ExecStart=/usr/bin/ztop ' "$ROOT/usr/lib/systemd/user/ztop-agent.service" \
   || { echo "The packaged unit doesn't start /usr/bin/ztop" >&2; exit 1; }
+# The system service for servers: its unit, its user, its options file and the pairing helper.
+S=packaging/systemd/system
+install -m 644 "$S/ztop-agent.service" "$ROOT/usr/lib/systemd/system/ztop-agent.service"
+grep -q '^ExecStart=/usr/bin/ztop agent ' "$ROOT/usr/lib/systemd/system/ztop-agent.service" \
+  || { echo "The system unit doesn't start /usr/bin/ztop" >&2; exit 1; }
+install -m 644 "$S/ztop.sysusers" "$ROOT/usr/lib/sysusers.d/ztop.conf"
+install -m 644 "$S/ztop-agent.default" "$ROOT/etc/default/ztop-agent"
+install -m 755 "$L/pair-system-agent" "$ROOT/usr/lib/ztop/pair-system-agent"
+install -m 644 "$L/README.server" "$ROOT/usr/share/doc/ztop/README.server"
 gzip -9n < packaging/man/ztop.1 > "$ROOT/usr/share/man/man1/ztop.1.gz"
 chmod 644 "$ROOT/usr/share/man/man1/ztop.1.gz"
 install -m 644 "$L/copyright" "$ROOT/usr/share/doc/ztop/copyright"
-install -m 755 "$L/debian/postinst" "$ROOT/DEBIAN/postinst"
+for script in postinst prerm postrm; do
+  install -m 755 "$L/debian/$script" "$ROOT/DEBIAN/$script"
+done
 
 KEYRING="$L/ztop-archive-keyring.asc"
 [ -f "$KEYRING" ] || { echo "No $KEYRING: the public key that signs zTop's apt repository" >&2; exit 1; }
 gpg --dearmor < "$KEYRING" > "$ROOT/usr/share/keyrings/ztop-archive-keyring.gpg"
 chmod 644 "$ROOT/usr/share/keyrings/ztop-archive-keyring.gpg"
 install -m 644 "$L/ztop.sources" "$ROOT/etc/apt/sources.list.d/ztop.sources"
-printf '%s\n' /etc/apt/sources.list.d/ztop.sources > "$ROOT/DEBIAN/conffiles"
+printf '%s\n' /etc/apt/sources.list.d/ztop.sources /etc/default/ztop-agent > "$ROOT/DEBIAN/conffiles"
 
 # The shared libraries ztop links, as package names and versions.
 mkdir -p "$WORK/shlibs/debian"
@@ -90,7 +102,7 @@ Version: $PACKAGE_VERSION
 Architecture: $ARCH
 Maintainer: Bristlecone IT Services
 Installed-Size: $SIZE
-Depends: $SHLIBS
+Depends: $SHLIBS, passwd
 Section: utils
 Priority: optional
 Homepage: https://github.com/BITS-Freeware/zTop
