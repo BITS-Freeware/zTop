@@ -31,6 +31,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The protocol paths the client fetches.
 pub const SNAPSHOT_PATH: &str = "/v1/snapshot";
+/// A hub's list of the machines it watches.
+pub const HOSTS_PATH: &str = "/v1/hosts";
 /// The recent-samples route; `?seconds=N` bounds the window.
 pub const HISTORY_PATH: &str = "/v1/history";
 
@@ -51,6 +53,9 @@ pub struct RemoteCollector {
     tls: Option<Arc<rustls::ClientConfig>>,
     /// The bearer token from pairing, if any.
     token: Option<String>,
+    /// Through a hub: the machine to read (`?host=`); `None` reads the
+    /// agent itself, or a hub's first machine.
+    machine: Option<String>,
 }
 
 impl RemoteCollector {
@@ -62,6 +67,7 @@ impl RemoteCollector {
             timeout: Duration::from_secs(5),
             tls: None,
             token: None,
+            machine: None,
         }
     }
 
@@ -77,8 +83,49 @@ impl RemoteCollector {
             target,
             timeout: Duration::from_secs(5),
             token,
+            machine: None,
         })
     }
+
+    /// Read one machine through a hub: snapshots and history carry
+    /// `?host=<name>`.
+    pub fn through_hub(mut self, machine: &str) -> Self {
+        self.machine = Some(machine.to_string());
+        self
+    }
+
+    /// `path` with the hub's machine selector, when one is set.
+    fn with_machine(&self, path: &str) -> String {
+        match &self.machine {
+            None => path.to_string(),
+            Some(machine) => {
+                let separator = if path.contains('?') { '&' } else { '?' };
+                format!("{path}{separator}host={}", query_escape(machine))
+            }
+        }
+    }
+}
+
+/// Percent-encodes everything outside RFC 3986's unreserved set.
+fn query_escape(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// One machine a hub watches, as `GET /v1/hosts` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct HubHost {
+    pub name: String,
+    /// The hub's word for it: `live`, `unreachable` or `pending`.
+    pub state: String,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// A client configuration whose only trust is the pin: the verifier
@@ -267,7 +314,8 @@ impl RemoteCollector {
     /// `seconds`, oldest first. The agent's ring drops process lists,
     /// so these samples carry none.
     pub fn history(&self, seconds: u64) -> Result<Vec<Sample>, CollectError> {
-        let mut envelope = self.fetch_envelope(&format!("{HISTORY_PATH}?seconds={seconds}"))?;
+        let mut envelope =
+            self.fetch_envelope(&self.with_machine(&format!("{HISTORY_PATH}?seconds={seconds}")))?;
         serde_json::from_value(envelope["samples"].take()).map_err(|_| CollectError::Unavailable {
             origin: "agent",
             what: "an understandable history",
@@ -276,6 +324,15 @@ impl RemoteCollector {
 }
 
 impl RemoteCollector {
+    /// `GET /v1/hosts` on a hub: the machines it watches.
+    pub fn hub_hosts(&self) -> Result<Vec<HubHost>, CollectError> {
+        let mut envelope = self.fetch_envelope(HOSTS_PATH)?;
+        serde_json::from_value(envelope["hosts"].take()).map_err(|_| CollectError::Unavailable {
+            origin: "hub",
+            what: "an understandable host list",
+        })
+    }
+
     /// `GET /v1/control`: the agent's own signal catalog, as
     /// `(name, number)` pairs. Signals are sent by these numbers, never
     /// the client's: macOS and Linux number STOP, TSTP and CONT
@@ -300,7 +357,7 @@ impl RemoteCollector {
 
 impl Collector for RemoteCollector {
     fn sample(&mut self) -> Result<Sample, CollectError> {
-        let mut envelope = self.fetch_envelope(SNAPSHOT_PATH)?;
+        let mut envelope = self.fetch_envelope(&self.with_machine(SNAPSHOT_PATH))?;
         serde_json::from_value(envelope["sample"].take()).map_err(|_| CollectError::Unavailable {
             origin: "agent",
             what: "an understandable sample",
@@ -656,6 +713,21 @@ mod tests {
     use super::*;
 
     const RESPONSE: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 15\r\n\r\n{\"protocol\": 1}\r\n";
+
+    #[test]
+    fn the_hub_selector_is_appended_and_escaped() {
+        let plain = RemoteCollector::new("127.0.0.1:7101".into());
+        assert_eq!(plain.with_machine(SNAPSHOT_PATH), "/v1/snapshot");
+        let through = plain.through_hub("host b/1");
+        assert_eq!(
+            through.with_machine(SNAPSHOT_PATH),
+            "/v1/snapshot?host=host%20b%2F1"
+        );
+        assert_eq!(
+            through.with_machine("/v1/history?seconds=60"),
+            "/v1/history?seconds=60&host=host%20b%2F1"
+        );
+    }
 
     #[test]
     fn a_pin_parses_when_well_formed_and_fails_otherwise() {

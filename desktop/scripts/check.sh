@@ -5,7 +5,9 @@
 # live tests and the recorded run spawn it), format and lint, the
 # tests (live agents, and the Secret Service store against a throwaway
 # gnome-keyring in its own D-Bus session), then the recorded run with
-# two paired agents, on the fleet and on a host's detail page.
+# two paired agents, on the fleet and on a host's detail page, and three
+# agents read through one hub, and an alert firing when an agent stops.
+# ZTOP_TEST_MULTICAST=1 adds the Bonjour test where multicast works.
 set -eu
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
@@ -44,5 +46,9 @@ run test env HOME="$KEYHOME" dbus-run-session -- sh -c '
     ZTOP_TEST_KEYRING=1 cargo test --manifest-path desktop/Cargo.toml'
 run recorded-run desktop/scripts/recorded-run.sh "$KEYHOME/overview.png"
 run recorded-detail env DETAIL=host-a SNAPSHOT_AFTER=12 desktop/scripts/recorded-run.sh "$KEYHOME/detail.png"
+run recorded-hub desktop/scripts/recorded-hub-run.sh "$KEYHOME/hub.png"
+run recorded-alerts env EXPECT_B=unreachable STALE_FOR=13 OPEN=alerts \
+    ALERT="Host down|unreachable|0|0" EXPECT_ALERT="Host down" \
+    desktop/scripts/recorded-run.sh "$KEYHOME/alerts.png" 3
 
 echo "check: all linux stages ok"

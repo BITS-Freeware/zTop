@@ -14,9 +14,11 @@ use gtk::{gio, glib};
 use ztop_desktop_core::freshness::POLL_INTERVAL;
 use ztop_desktop_core::{FileTokenStore, HostLive, HostRecord, HostRegistry, TokenStore, agent};
 
+use crate::alerts::AlertsPage;
 use crate::card::Card;
 use crate::detail::Detail;
 use crate::secret::SecretServiceStore;
+use ztop_desktop_core::alerts::{AlertBook, AlertEngine, AlertRule};
 
 const CSS: &str = r#"
 .state-pill { border-radius: 999px; padding: 2px 10px; font-size: smaller; font-weight: bold; }
@@ -57,6 +59,14 @@ pub struct Fleet {
     live: RefCell<HashMap<String, HostLive>>,
     cards: RefCell<HashMap<String, Card>>,
     in_flight: RefCell<HashSet<String>>,
+    /// Each hub's machines (by hub id), read through it; never saved.
+    members: RefCell<HashMap<String, Vec<HostRecord>>>,
+    /// The saved alert rules, and the engine that fires them.
+    alert_book: RefCell<Option<AlertBook>>,
+    engine: RefCell<AlertEngine>,
+    alerts_page: RefCell<Option<Rc<AlertsPage>>>,
+    /// Each hub's own state, from its host list.
+    hub_states: RefCell<HashMap<String, ztop_desktop_core::HostState>>,
     /// The open detail page, if any; it follows its host's polls.
     pub detail: RefCell<Option<Rc<Detail>>>,
 }
@@ -76,8 +86,11 @@ impl Fleet {
     fn build(application: &adw::Application) -> Rc<Self> {
         let add = gtk::Button::from_icon_name("list-add-symbolic");
         add.set_tooltip_text(Some("Add a host"));
+        let bell = gtk::Button::from_icon_name("alarm-symbolic");
+        bell.set_tooltip_text(Some("Alert rules"));
         let header = adw::HeaderBar::new();
         header.pack_start(&add);
+        header.pack_end(&bell);
 
         let banner = adw::Banner::new(
             "No desktop keyring is running, so pairing tokens are kept in a private file instead.",
@@ -158,6 +171,11 @@ impl Fleet {
             cards: RefCell::new(HashMap::new()),
             in_flight: RefCell::new(HashSet::new()),
             detail: RefCell::new(None),
+            members: RefCell::new(HashMap::new()),
+            hub_states: RefCell::new(HashMap::new()),
+            alert_book: RefCell::new(None),
+            engine: RefCell::new(AlertEngine::default()),
+            alerts_page: RefCell::new(None),
         });
         {
             let flow = fleet.flow.clone();
@@ -167,6 +185,10 @@ impl Fleet {
                     fleet.open_detail(&child.widget_name());
                 }
             });
+        }
+        {
+            let fleet = fleet.clone();
+            bell.connect_clicked(move |_| fleet.open_alerts());
         }
         for button in [&add, &add_first] {
             let fleet = fleet.clone();
@@ -188,17 +210,18 @@ impl Fleet {
                 None => Arc::new(FileTokenStore::new(&dir)),
             };
             let registry = HostRegistry::load(&dir).map_err(|e| e.to_string())?;
+            let book = AlertBook::load(&dir).map_err(|e| format!("alerts.json: {e}"))?;
             let tokens: HashMap<String, String> = registry
                 .records
                 .iter()
                 .filter_map(|r| store.load(&r.id).map(|t| (r.id.clone(), t)))
                 .collect();
-            Ok::<_, String>((store, registry, tokens))
+            Ok::<_, String>((store, registry, tokens, book))
         })
         .await
         .unwrap_or_else(|_| Err("loading the saved hosts failed".into()));
 
-        let (store, registry, tokens) = match loaded {
+        let (store, registry, tokens, book) = match loaded {
             Ok(loaded) => loaded,
             Err(why) => {
                 self.stack.set_visible_child_name("empty");
@@ -208,6 +231,7 @@ impl Fleet {
         };
         self.banner.set_revealed(store.kind() == "a private file");
         *self.store.borrow_mut() = Some(store);
+        *self.alert_book.borrow_mut() = Some(book);
         *self.tokens.borrow_mut() = tokens;
         let records = registry.records.clone();
         *self.registry.borrow_mut() = Some(registry);
@@ -241,12 +265,14 @@ impl Fleet {
     /// Each saved host's name and the word its card shows now.
     pub fn states(&self) -> Vec<(String, &'static str)> {
         let live = self.live.borrow();
-        self.records()
+        let hub_states = self.hub_states.borrow();
+        self.all_records()
             .into_iter()
             .map(|r| {
-                let state = live
-                    .get(&r.id)
-                    .map_or(ztop_desktop_core::HostState::Connecting, |l| l.state);
+                let state = hub_states.get(&r.id).copied().unwrap_or_else(|| {
+                    live.get(&r.id)
+                        .map_or(ztop_desktop_core::HostState::Connecting, |l| l.state)
+                });
                 (r.name, state.label())
             })
             .collect()
@@ -264,6 +290,18 @@ impl Fleet {
             .unwrap_or_default()
     }
 
+    /// The saved records and every hub's machines.
+    pub fn all_records(&self) -> Vec<HostRecord> {
+        let members = self.members.borrow();
+        let mut all = Vec::new();
+        for record in self.records() {
+            let machines = members.get(&record.id).cloned().unwrap_or_default();
+            all.push(record);
+            all.extend(machines);
+        }
+        all
+    }
+
     fn add_card(self: &Rc<Self>, record: &HostRecord) {
         let card = Card::new(record);
         let id = record.id.clone();
@@ -272,7 +310,7 @@ impl Fleet {
         card.root.set_widget_name(&id);
         {
             let fleet = self.clone();
-            let id = id.clone();
+            let id = record.token_id().to_string();
             card.pair
                 .connect_clicked(move |_| crate::dialogs::pair_host(&fleet, &id));
         }
@@ -282,7 +320,23 @@ impl Fleet {
             card.remove
                 .connect_clicked(move |_| crate::dialogs::confirm_remove(&fleet, &id));
         }
-        self.flow.append(&card.root);
+        // A machine read through a hub goes when the hub drops it.
+        card.remove.set_visible(record.via.is_none());
+        // A hub's machines sit right after its card.
+        let after_hub = record.via.as_ref().and_then(|(hub, _)| {
+            let cards = self.cards.borrow();
+            let mut last = cards.get(hub)?.root.index();
+            for (id, other) in cards.iter() {
+                if id.starts_with(&format!("{hub}/")) {
+                    last = last.max(other.root.index());
+                }
+            }
+            Some(last + 1)
+        });
+        match after_hub {
+            Some(position) => self.flow.insert(&card.root, position),
+            None => self.flow.append(&card.root),
+        }
         self.cards.borrow_mut().insert(id, card);
     }
 
@@ -339,6 +393,13 @@ impl Fleet {
         if let Some(card) = self.cards.borrow_mut().remove(id) {
             self.flow.remove(&card.root);
         }
+        for machine in self.members.borrow_mut().remove(id).unwrap_or_default() {
+            if let Some(card) = self.cards.borrow_mut().remove(&machine.id) {
+                self.flow.remove(&card.root);
+            }
+            self.live.borrow_mut().remove(&machine.id);
+        }
+        self.hub_states.borrow_mut().remove(id);
         self.live.borrow_mut().remove(id);
         self.tokens.borrow_mut().remove(id);
         if let Some(store) = self.store.borrow().clone() {
@@ -351,10 +412,14 @@ impl Fleet {
     /// Pushes the detail page for host `id` and reads the agent's
     /// history for it on a worker thread.
     pub fn open_detail(self: &Rc<Self>, id: &str) {
-        let Some(record) = self.records().into_iter().find(|r| r.id == id) else {
+        let Some(record) = self
+            .all_records()
+            .into_iter()
+            .find(|r| r.id == id && !r.hub)
+        else {
             return;
         };
-        let token = self.tokens.borrow().get(id).cloned();
+        let token = self.tokens.borrow().get(record.token_id()).cloned();
         let detail = Detail::new(&record, token.clone(), &self.toasts);
         {
             let fleet = Rc::downgrade(self);
@@ -394,11 +459,16 @@ impl Fleet {
     /// Reads one host on a worker thread, unless a read is already out:
     /// a slow host never piles up threads or holds up the others.
     fn poll(self: &Rc<Self>, record: &HostRecord) {
+        if record.hub {
+            self.poll_hub(record);
+            return;
+        }
         if !self.in_flight.borrow_mut().insert(record.id.clone()) {
             return;
         }
-        let token = self.tokens.borrow().get(&record.id).cloned();
+        let token = self.tokens.borrow().get(record.token_id()).cloned();
         let record = record.clone();
+        let record_name = record.name.clone();
         let fleet = self.clone();
         glib::spawn_future_local(async move {
             let id = record.id.clone();
@@ -411,6 +481,7 @@ impl Fleet {
             let Some(card) = cards.get(&id) else { return };
             let mut live = fleet.live.borrow_mut();
             let entry_id = id.clone();
+            let name = record_name.clone();
             let entry = live.entry(id).or_default();
             entry.apply(result, Instant::now());
             card.show(entry);
@@ -422,6 +493,174 @@ impl Fleet {
                     detail.push(sample);
                 }
             }
+            // Alerts read the same result: metrics only from a live
+            // sample, and unreachable once the freshness window passed.
+            let state = entry.state;
+            let sample = (state == ztop_desktop_core::HostState::Live)
+                .then(|| entry.sample.clone())
+                .flatten();
+            drop(live);
+            drop(cards);
+            fleet.evaluate_alerts(&entry_id, &name, sample.as_ref(), state);
         });
+    }
+}
+
+impl Fleet {
+    /// Reads a hub's host list: its own card shows how many machines
+    /// it watches, each machine gets (or loses) a card of its own, and
+    /// every machine is then read through the hub.
+    fn poll_hub(self: &Rc<Self>, hub: &HostRecord) {
+        if !self.in_flight.borrow_mut().insert(hub.id.clone()) {
+            return;
+        }
+        let token = self.tokens.borrow().get(&hub.id).cloned();
+        let fleet = self.clone();
+        let hub = hub.clone();
+        glib::spawn_future_local(async move {
+            let for_read = hub.clone();
+            let result = gio::spawn_blocking(move || agent::hub_hosts(&for_read, token))
+                .await
+                .unwrap_or_else(|_| Err(agent::ReadError::Failed("the read crashed".into())));
+            fleet.in_flight.borrow_mut().remove(&hub.id);
+            if !fleet.cards.borrow().contains_key(&hub.id) {
+                return;
+            }
+            use ztop_desktop_core::HostState;
+            let (state, summary, error) = match &result {
+                Ok(hosts) => {
+                    let live = hosts.iter().filter(|h| h.state == "live").count();
+                    let summary = match hosts.len() {
+                        0 => "Watching no machines yet".to_string(),
+                        1 => format!("Watching 1 machine, {live} live"),
+                        n => format!("Watching {n} machines, {live} live"),
+                    };
+                    (HostState::Live, summary, None)
+                }
+                Err(agent::ReadError::NeedsPairing) => (
+                    HostState::NeedsPairing,
+                    String::new(),
+                    Some(agent::ReadError::NeedsPairing.to_string()),
+                ),
+                Err(why) => (HostState::Unreachable, String::new(), Some(why.to_string())),
+            };
+            fleet.hub_states.borrow_mut().insert(hub.id.clone(), state);
+            if let Some(card) = fleet.cards.borrow().get(&hub.id) {
+                card.show_hub(state, &summary, error.as_deref());
+            }
+            let Ok(hosts) = result else { return };
+
+            // Machines the hub no longer lists lose their cards.
+            let names: Vec<String> = hosts.into_iter().map(|h| h.name).collect();
+            let known = fleet
+                .members
+                .borrow()
+                .get(&hub.id)
+                .cloned()
+                .unwrap_or_default();
+            for gone in known.iter().filter(|m| !names.contains(&m.name)) {
+                if let Some(card) = fleet.cards.borrow_mut().remove(&gone.id) {
+                    fleet.flow.remove(&card.root);
+                }
+                fleet.live.borrow_mut().remove(&gone.id);
+            }
+            let machines: Vec<HostRecord> = names.iter().map(|n| hub.machine(n)).collect();
+            for machine in &machines {
+                if !fleet.cards.borrow().contains_key(&machine.id) {
+                    fleet.add_card(machine);
+                }
+            }
+            fleet
+                .members
+                .borrow_mut()
+                .insert(hub.id.clone(), machines.clone());
+            fleet.refresh_stack();
+            for machine in &machines {
+                fleet.poll(machine);
+            }
+        });
+    }
+}
+
+impl Fleet {
+    pub fn alert_rules(&self) -> Vec<AlertRule> {
+        self.alert_book
+            .borrow()
+            .as_ref()
+            .map(|b| b.rules.clone())
+            .unwrap_or_default()
+    }
+
+    /// The names of the hosts a rule is firing for now.
+    pub fn firing_for(&self, rule: &str) -> Vec<String> {
+        let all = self.all_records();
+        self.engine
+            .borrow()
+            .firing(rule)
+            .into_iter()
+            .map(|id| {
+                all.iter()
+                    .find(|r| r.id == id)
+                    .map_or(id, |r| r.name.clone())
+            })
+            .collect()
+    }
+
+    pub fn add_alert_rule(&self, rule: AlertRule) {
+        let mut book = self.alert_book.borrow_mut();
+        let Some(book) = book.as_mut() else { return };
+        book.rules.push(rule);
+        if let Err(why) = book.save() {
+            self.toast(&format!("Could not save the rule: {why}"));
+        }
+    }
+
+    pub fn remove_alert_rule(&self, id: &str) {
+        let mut book = self.alert_book.borrow_mut();
+        let Some(book) = book.as_mut() else { return };
+        book.rules.retain(|r| r.id != id);
+        if let Err(why) = book.save() {
+            self.toast(&format!("Could not save the change: {why}"));
+        }
+    }
+
+    pub fn open_alerts(self: &Rc<Self>) {
+        let page = AlertsPage::new(self);
+        self.nav.push(&page.page);
+        *self.alerts_page.borrow_mut() = Some(page);
+    }
+
+    fn evaluate_alerts(
+        self: &Rc<Self>,
+        id: &str,
+        name: &str,
+        sample: Option<&ztop_core::model::Sample>,
+        state: ztop_desktop_core::HostState,
+    ) {
+        let rules = self.alert_rules();
+        if rules.is_empty() {
+            return;
+        }
+        let unreachable = state == ztop_desktop_core::HostState::Unreachable;
+        let events =
+            self.engine
+                .borrow_mut()
+                .evaluate(&rules, id, sample, unreachable, Instant::now());
+        for event in &events {
+            crate::alerts::announce(self, event, name);
+        }
+        if !events.is_empty() {
+            let page = self.alerts_page.borrow().clone();
+            if let Some(page) = page {
+                page.refresh(self);
+            }
+        }
+    }
+
+    /// Adds a rule for every host (recorded runs), unless rules exist.
+    pub fn seed_alert(&self, rule: AlertRule) {
+        if self.alert_rules().is_empty() {
+            self.add_alert_rule(rule);
+        }
     }
 }

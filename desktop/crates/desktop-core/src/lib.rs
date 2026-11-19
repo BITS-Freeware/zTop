@@ -6,6 +6,8 @@
 //! agent or hub through `ztop-core`'s own client.
 
 pub mod agent;
+pub mod alerts;
+pub mod discovery;
 pub mod freshness;
 pub mod history;
 pub mod hosts;

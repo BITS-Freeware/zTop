@@ -21,6 +21,14 @@ pub struct HostRecord {
     pub port: u16,
     /// The `SHA256:<hex>` pin; empty means plain HTTP, loopback only.
     pub pin: String,
+    /// A hub: its card lists the machines it watches, and each of them
+    /// gets a card of its own read through the hub.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hub: bool,
+    /// For a machine read through a hub (never saved): the hub's
+    /// record id, whose token it uses, and the machine's name there.
+    #[serde(skip)]
+    pub via: Option<(String, String)>,
 }
 
 impl HostRecord {
@@ -34,7 +42,33 @@ impl HostRecord {
             host: host.to_string(),
             port,
             pin: pin.to_string(),
+            hub: false,
+            via: None,
         }
+    }
+
+    /// The same record marked as a hub.
+    pub fn as_hub(mut self) -> Self {
+        self.hub = true;
+        self
+    }
+
+    /// A card for `machine`, read through this hub with its token.
+    pub fn machine(&self, machine: &str) -> Self {
+        Self {
+            id: format!("{}/{machine}", self.id),
+            name: machine.to_string(),
+            host: self.host.clone(),
+            port: self.port,
+            pin: self.pin.clone(),
+            hub: false,
+            via: Some((self.id.clone(), machine.to_string())),
+        }
+    }
+
+    /// Where this record's token is kept: its own id, or its hub's.
+    pub fn token_id(&self) -> &str {
+        self.via.as_ref().map_or(&self.id, |(hub, _)| hub)
     }
 
     /// `host:port` as the client dials it; IPv6 literals get brackets.
@@ -142,6 +176,34 @@ mod tests {
         let mut again = again;
         again.remove(&a.id).unwrap();
         assert_eq!(HostRegistry::load(&dir).unwrap().records, vec![b]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_hub_is_saved_as_one_and_its_machines_never_are() {
+        let dir = temp_dir("hub");
+        let mut registry = HostRegistry::load(&dir).unwrap();
+        let hub = HostRecord::new("hub-1", "127.0.0.1", 7101, "SHA256:00").as_hub();
+        let plain = HostRecord::new("host-a", "127.0.0.1", 7100, "");
+        registry.add(hub.clone()).unwrap();
+        registry.add(plain.clone()).unwrap();
+        let text = std::fs::read_to_string(dir.join("hosts.json")).unwrap();
+        assert_eq!(
+            text.matches("\"hub\"").count(),
+            1,
+            "only the hub says so: {text}"
+        );
+        assert_eq!(
+            HostRegistry::load(&dir).unwrap().records,
+            vec![hub.clone(), plain]
+        );
+
+        let machine = hub.machine("host-b");
+        assert_eq!(machine.name, "host-b");
+        assert_eq!(machine.target(), hub.target());
+        assert_eq!(machine.token_id(), hub.id);
+        assert_ne!(machine.id, hub.id);
+        assert!(!machine.hub);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

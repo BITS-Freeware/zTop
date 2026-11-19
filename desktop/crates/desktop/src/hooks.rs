@@ -4,8 +4,15 @@
 //!
 //! - `ZTOP_DESKTOP_SEED`: hosts to pair and add when no saved host has
 //!   that name, as `name|address|port|fingerprint|code` entries joined
-//!   by `;` (fingerprint and code empty for a plain loopback agent).
-//! - `ZTOP_DESKTOP_OPEN=add`: open the add-host dialog at start.
+//!   by `;` (fingerprint and code empty for a plain loopback agent). A
+//!   sixth field `hub` adds a hub.
+//! - `ZTOP_DESKTOP_OPEN=add`: open the add-host dialog at start;
+//!   `ZTOP_DESKTOP_OPEN=alerts`: open the alerts page.
+//! - `ZTOP_DESKTOP_ALERT=<name>|<kind>|<threshold>|<seconds>`: add that
+//!   rule for every host when no rule is saved (`kind` as in
+//!   alerts.json: cpu, memory, load, disk, unreachable). Fired and
+//!   cleared alerts are reported as `ztop-desktop: alert fired <rule>
+//!   on <host>` lines.
 //! - `ZTOP_DESKTOP_SIZE=<width>x<height>`: the window's size, so a
 //!   recorded page fits in one picture.
 //! - `ZTOP_DESKTOP_DETAIL=<name>`: open that host's detail page once
@@ -32,8 +39,14 @@ use ztop_desktop_core::{NewHost, agent};
 use crate::app::Fleet;
 
 pub fn run(fleet: &Rc<Fleet>) {
-    if std::env::var("ZTOP_DESKTOP_OPEN").as_deref() == Ok("add") {
-        crate::dialogs::add_host(fleet);
+    let alert = std::env::var("ZTOP_DESKTOP_ALERT").unwrap_or_default();
+    if !alert.trim().is_empty() {
+        seed_alert(fleet, alert.trim());
+    }
+    match std::env::var("ZTOP_DESKTOP_OPEN").as_deref() {
+        Ok("add") => crate::dialogs::add_host(fleet),
+        Ok("alerts") => fleet.open_alerts(),
+        _ => {}
     }
     if let Ok(seed) = std::env::var("ZTOP_DESKTOP_SEED") {
         seed_hosts(fleet, &seed);
@@ -90,7 +103,7 @@ fn open_detail_when_live(fleet: &Rc<Fleet>, name: String) {
         if !live {
             return glib::ControlFlow::Continue;
         }
-        if let Some(record) = fleet.records().into_iter().find(|r| r.name == name) {
+        if let Some(record) = fleet.all_records().into_iter().find(|r| r.name == name) {
             fleet.open_detail(&record.id);
             if std::env::var("ZTOP_DESKTOP_SCROLL").as_deref() == Ok("processes") {
                 // After the history and the first layout have landed.
@@ -106,13 +119,38 @@ fn open_detail_when_live(fleet: &Rc<Fleet>, name: String) {
     });
 }
 
+fn seed_alert(fleet: &Rc<Fleet>, spec: &str) {
+    use ztop_desktop_core::alerts::{AlertKind, AlertRule};
+    let parts: Vec<&str> = spec.split('|').collect();
+    let [name, kind, threshold, seconds] = parts[..] else {
+        eprintln!("ztop-desktop: an alert seed needs four fields: {spec}");
+        return;
+    };
+    let kind = match serde_json::from_value::<AlertKind>(serde_json::Value::from(kind)) {
+        Ok(kind) => kind,
+        Err(_) => {
+            eprintln!("ztop-desktop: unknown alert kind {kind}");
+            return;
+        }
+    };
+    let (Ok(threshold), Ok(seconds)) = (threshold.parse(), seconds.parse()) else {
+        eprintln!("ztop-desktop: the alert seed's threshold and seconds are numbers: {spec}");
+        return;
+    };
+    fleet.seed_alert(AlertRule::new(name, None, kind, threshold, seconds));
+}
+
 fn seed_hosts(fleet: &Rc<Fleet>, seed: &str) {
     let known: Vec<String> = fleet.records().into_iter().map(|r| r.name).collect();
     for entry in seed.split(';').filter(|e| !e.trim().is_empty()) {
         let parts: Vec<&str> = entry.split('|').collect();
-        let [name, host, port, pin, code] = parts[..] else {
-            eprintln!("ztop-desktop: a seed entry needs five fields: {entry}");
-            continue;
+        let (name, host, port, pin, code, kind) = match parts[..] {
+            [name, host, port, pin, code] => (name, host, port, pin, code, ""),
+            [name, host, port, pin, code, kind] => (name, host, port, pin, code, kind),
+            _ => {
+                eprintln!("ztop-desktop: a seed entry needs five or six fields: {entry}");
+                continue;
+            }
         };
         if known.iter().any(|k| k == name) {
             continue;
@@ -123,6 +161,7 @@ fn seed_hosts(fleet: &Rc<Fleet>, seed: &str) {
             port: port.into(),
             pin: pin.into(),
             code: code.into(),
+            hub: kind == "hub",
         };
         let record = match form.validate() {
             Ok(record) => record,

@@ -79,7 +79,23 @@ pub fn send_signal(
     }
 }
 
+/// The machines a hub watches, by its own account.
+pub fn hub_hosts(
+    record: &HostRecord,
+    token: Option<String>,
+) -> Result<Vec<ztop_core::client::HubHost>, ReadError> {
+    collector(record, token)?.hub_hosts().map_err(read_error)
+}
+
 fn collector(record: &HostRecord, token: Option<String>) -> Result<RemoteCollector, ReadError> {
+    let collector = plain_or_tls(record, token)?;
+    Ok(match &record.via {
+        Some((_, machine)) => collector.through_hub(machine),
+        None => collector,
+    })
+}
+
+fn plain_or_tls(record: &HostRecord, token: Option<String>) -> Result<RemoteCollector, ReadError> {
     Ok(if record.pin.is_empty() {
         RemoteCollector::new(record.target())
     } else {
@@ -131,6 +147,8 @@ pub struct NewHost {
     pub port: String,
     pub pin: String,
     pub code: String,
+    /// The address is a hub (`ztop hub`), not one agent.
+    pub hub: bool,
 }
 
 /// The agent's default port, shown in the form.
@@ -172,12 +190,8 @@ impl NewHost {
             "" => host,
             name => name,
         };
-        Ok(HostRecord::new(
-            name,
-            host.trim_matches(['[', ']']),
-            port,
-            pin,
-        ))
+        let record = HostRecord::new(name, host.trim_matches(['[', ']']), port, pin);
+        Ok(if self.hub { record.as_hub() } else { record })
     }
 }
 
@@ -204,6 +218,7 @@ mod tests {
             port: port.into(),
             pin: pin.into(),
             code: code.into(),
+            hub: false,
         }
     }
 
