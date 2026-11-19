@@ -5,11 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.1] - 2026-11-19
 
 ### Added
 
 - **apt**: a one-line installer for Debian, Ubuntu and Raspberry Pi OS (`curl -fsSL https://downloads.bristleconeit.com/ztop/install.sh | sh`) and a signed apt repository, so `sudo apt upgrade` keeps ztop current (decision 0065).
+
+### Security
+
+- Control refuses pid 0, process-group pids and signals outside the catalog; listing and revoking tokens needs the new `manage` right (`--allow-manage`); pairing codes are eight symbols, burned by five wrong guesses and spaced a second apart; the launchd log moved out of /tmp (decision 0061).
+- One accept loop with handshake and header deadlines and a connection cap serves the agent and the hub, so a failed accept or a stalled peer no longer stops or ties up the server (decision 0064).
+
+### Fixed
+
+- The syscall tracer sends every request from its own thread, so closing a trace detaches and releases the process (decision 0060).
+- The hub prunes history older than 24 hours, stores it without process lists and caps a window at one hour (decision 0062).
+- The live Linux collector reads command lines, finds mounted disks by their diskstats name and keeps core numbers across offline cores (decision 0063).
 
 ### Changed
 

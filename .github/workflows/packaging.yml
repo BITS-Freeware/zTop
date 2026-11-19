@@ -100,7 +100,7 @@ jobs:
         run: ruby -c packaging/homebrew/ztop.rb
       - name: Install the formula from this checkout
         run: |
-          # The real formula builds from the v0.1.0 git tag; the tag does
+          # The real formula builds from the v0.1.1 git tag; the tag does
           # not exist until release, so the CI check points the same
           # formula at this checkout with a file:// git URL (decision
           # 0058). The git download strategy defaults to a "master"
@@ -114,11 +114,11 @@ jobs:
           git -C "$repo" branch -f ztop-ci-build HEAD
           tap="$RUNNER_TEMP/ztop-tap"
           mkdir -p "$tap/Formula"
-          sed 's|url "https://github.com/BITS-Freeware/zTop.git", tag: "v0.1.0"|url "file://'"$repo"'", using: :git, branch: "ztop-ci-build"|' \
+          sed 's|url "https://github.com/BITS-Freeware/zTop.git", tag: "v0.1.1"|url "file://'"$repo"'", using: :git, branch: "ztop-ci-build"|' \
             packaging/homebrew/ztop.rb > "$tap/Formula/ztop.rb"
           git -C "$tap" init -q
           git -C "$tap" add Formula
-          git -C "$tap" -c user.name=ci -c user.email=ci@ztop.dev commit -qm "ztop 0.1.0"
+          git -C "$tap" -c user.name=ci -c user.email=ci@ztop.dev commit -qm "ztop 0.1.1"
           brew tap local/ztop "$tap"
           # A local tap must be trusted before its formulae load (older
           # brew versions have no such requirement; tolerate both).
@@ -144,10 +144,10 @@ jobs:
           # `brew tap` clones the tap into Homebrew's own tree, so the
           # version bump must land in the installed clone, not in the
           # source directory brew no longer reads; a bump only in the
-          # source leaves the clone at 0.1.0, the upgrade is a no-op,
+          # source leaves the clone at 0.1.1, the upgrade is a no-op,
           # and the version check below fails.
           tap_installed="$(brew --repository)/Library/Taps/local/homebrew-ztop"
-          sed -i '' 's/version "0.1.0"/version "0.1.1"/' "$tap_installed/Formula/ztop.rb"
+          sed -i '' 's/version "0.1.1"/version "0.1.2"/' "$tap_installed/Formula/ztop.rb"
           if brew upgrade --build-from-source local/ztop/ztop \
               > "$RUNNER_TEMP/brew-upgrade.log" 2>&1
           then
@@ -160,7 +160,7 @@ jobs:
             echo "::error title=brew upgrade ztop::${msg}"
             exit 1
           fi
-          brew list --versions ztop | grep -q 0.1.1
+          brew list --versions ztop | grep -q 0.1.2
       - name: Start the agent as a service and pair a test client
         run: |
           brew services start ztop

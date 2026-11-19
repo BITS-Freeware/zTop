@@ -16,8 +16,8 @@
 class Ztop < Formula
   desc "A lightweight system monitor for macOS and Linux"
   homepage "https://github.com/BITS-Freeware/zTop"
-  url "https://github.com/BITS-Freeware/zTop.git", tag: "v0.1.0"
-  version "0.1.0"
+  url "https://github.com/BITS-Freeware/zTop.git", tag: "v0.1.1"
+  version "0.1.1"
   license any_of: ["MIT", "Apache-2.0"]
 
   depends_on "rust" => :build
