@@ -343,7 +343,7 @@ impl Config {
     /// Save to an explicit path (also the seam tests use).
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            ztop_core::paths::create_private_dir(parent)?;
         }
         let text = serde_json::to_string_pretty(self).expect("config serializes");
         std::fs::write(path, text)

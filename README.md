@@ -6,6 +6,12 @@ Resource monitoring for a mixed fleet of Macs and Linux machines.
 - **zTop for Linux** (`desktop/`), a GTK4 desktop app that watches every machine at once through the agent and hub. See [desktop/README.md](desktop/README.md).
 - **zTop**, an app for iPad and Mac that does the same. The app is developed separately.
 
+On Debian, Ubuntu or Raspberry Pi OS (64-bit), install `ztop` with:
+
+    curl -fsSL https://downloads.bristleconeit.com/ztop/install.sh | sh
+
+It adds zTop's signed apt repository, so `sudo apt upgrade` keeps it current. On a Mac, use the Homebrew formula in [packaging](packaging/README.md).
+
 Status: 0.1.0, an early release. See [ROADMAP.md](ROADMAP.md) for the plan, [DESIGN.md](DESIGN.md) for how it works, and [STATUS.md](STATUS.md) for where work stands.
 
 ## License

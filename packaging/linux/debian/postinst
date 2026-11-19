@@ -1,0 +1,25 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT OR Apache-2.0
+set -e
+if [ "$1" = "configure" ]; then
+  # The system agent's user (packaging/systemd/system/ztop.sysusers). It exists whether or not
+  # anyone turns the system agent on, so turning it on later needs no further setup.
+  if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers ztop.conf
+  elif ! getent passwd ztop >/dev/null; then
+    useradd --system --user-group --home-dir /var/lib/ztop --no-create-home \
+      --shell /usr/sbin/nologin --comment "zTop agent" ztop
+  fi
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  if [ -z "$2" ]; then
+    # A first install. Both agents stay off until someone turns one on: the user service serves
+    # that person's view of this machine, the system service serves it to a network.
+    echo "ztop is installed. Run ztop for the monitor."
+    echo "To serve this machine to the zTop app or a hub:"
+    echo "  on a desktop: systemctl --user enable --now ztop-agent"
+    echo "  on a server:  see /usr/share/doc/ztop/README.server"
+  fi
+fi
+exit 0
