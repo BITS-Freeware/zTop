@@ -42,7 +42,7 @@ run smoke sh -c '
         echo "$frame" | head -1
     done
 '
-run deny cargo deny check licenses bans sources
+run deny cargo deny check advisories licenses bans sources
 # The service files: the plist is linted where plutil exists (macOS);
 # both are checked for the keys a service needs on either platform.
 run packaging sh -c '

@@ -38,9 +38,59 @@ pub fn state_dir_with(home: Option<&OsStr>, xdg: Option<&OsStr>) -> Option<PathB
     }
 }
 
+/// Create `dir` and any missing parents, each new one mode 0700 on
+/// unix, so ztop's state (tokens, keys, history) is never readable by
+/// other users, not even for the moment between a create and a chmod.
+/// An existing directory is tightened to 0700 when it is ztop's own
+/// state directory or inside it; other existing parents are left alone.
+pub fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let existed = dir.is_dir();
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        if existed && is_ours(dir) {
+            let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Whether `dir` is ztop's state directory or inside it.
+#[cfg(unix)]
+fn is_ours(dir: &std::path::Path) -> bool {
+    state_dir().is_some_and(|state| dir.starts_with(state))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (audit M6): the state directory was created 0755.
+    #[cfg(unix)]
+    #[test]
+    fn private_dirs_are_created_0700_all_the_way_down() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("ztop-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let deep = base.join("a").join("b");
+        create_private_dir(&deep).expect("creates");
+        for dir in [&base, &base.join("a"), &deep] {
+            let mode = std::fs::metadata(dir).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", dir.display());
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn without_a_home_there_is_no_state_dir() {
