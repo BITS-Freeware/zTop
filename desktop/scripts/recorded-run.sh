@@ -9,7 +9,7 @@
 #   desktop/scripts/recorded-run.sh <out.png> [kill-b-after-seconds]
 #
 # With a second argument, host-b's agent is stopped that many seconds
-# in, to record the stale or unreachable card instead; the check then
+# after the app pairs with it, to record the stale or unreachable card instead; the check then
 # expects host-b in the state named by EXPECT_B (default stale).
 # With DETAIL=host-a the app opens that host's detail page instead and
 # the check also expects the CPU, memory and load sections and the
@@ -52,8 +52,16 @@ start_agent host-b "$PORT_B"
 SEED="$(seed_entry host-a "$PORT_A");$(seed_entry host-b "$PORT_B")"
 
 if [ -n "$KILL_B" ]; then
-    (sleep "$KILL_B"; kill "$(cat "$WORK/host-b.pid")") &
-    AFTER=$((KILL_B + ${STALE_FOR:-4}))
+    # Count from host-b's pairing, not from now: the app pairs after its
+    # own start-up, which can take longer than KILL_B on a slow machine,
+    # and a host stopped before it pairs never becomes a card. The agent
+    # writes tokens.json when a client pairs.
+    (i=0
+     while [ ! -s "$WORK/host-b/.config/ztop/tokens.json" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+     sleep "$KILL_B"; kill "$(cat "$WORK/host-b.pid")") &
+    # Five more seconds for the app's start-up and pairing, which the
+    # stop now waits for.
+    AFTER=$((5 + KILL_B + ${STALE_FOR:-4}))
 else
     AFTER="${SNAPSHOT_AFTER:-8}"
 fi

@@ -2,9 +2,9 @@
 
 Updated after every working session.
 
-- **Current milestone:** zTop for Linux, L5 (packaging), after the 0.1.0 release.
-- **Last done:** zTop for Linux L2 (host detail, decision 0066), L3 (processes and control, decision 0067) and L4 (hub, Bonjour, alerts, decision 0075).
-- **Next step:** L5; a recorded detail run on a machine with temperature sensors and fans; measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
+- **Current milestone:** zTop for Linux, L5 (packaging), after the 0.1.2 release.
+- **Last done:** zTop for Linux L2 (host detail, decision 0077), L3 (processes and control, decision 0067) and L4 (hub, Bonjour, alerts, decision 0075).
+- **Next step:** L5; a recorded detail run on a machine with temperature sensors and fans; measure the agent's budget over a full hour on a busy macOS and Linux host, and record it; then the audit's low findings.
 - **Blocked on:** nothing.
 
 ## Log
@@ -15,9 +15,15 @@ Newest first. One or two lines per session: what changed, what is next.
 
 - 2026-11-19: zTop for Linux L3 (decision 0067): a Processes section on the detail page (search, sort with a pid tie-break, 30 busiest rows from the poll, a signal menu per row from the target's catalog via new `RemoteCollector::signal_catalog`, KILL behind an `AdwAlertDialog`). End-to-end test sends STOP, CONT and TERM to a `sleep` it owns and checks `/proc`. Recorded `desktop-processes.png` (`ZTOP_DESKTOP_SEARCH`, `ZTOP_DESKTOP_SCROLL` hooks). Next: L4.
 
-- 2026-11-19: zTop for Linux L2 (decision 0066): a card click opens the host's detail page, seeded from the agent's `/v1/history` (new `RemoteCollector::history` in `ztop-core`) and then fed by the fleet poll; cairo charts with a 1-2-5 scale and a span that grows with the held history, per-core bars, disk rows. New check.sh stage `recorded-detail` (`ZTOP_DESKTOP_DETAIL`, `ZTOP_DESKTOP_SIZE` hooks). The recording machine has no sensors, so the temperature and fan sections are unit-tested only. Next: L3.
+- 2026-11-19: zTop for Linux L2 (decision 0077): a card click opens the host's detail page, seeded from the agent's `/v1/history` (new `RemoteCollector::history` in `ztop-core`) and then fed by the fleet poll; cairo charts with a 1-2-5 scale and a span that grows with the held history, per-core bars, disk rows. New check.sh stage `recorded-detail` (`ZTOP_DESKTOP_DETAIL`, `ZTOP_DESKTOP_SIZE` hooks). The recording machine has no sensors, so the temperature and fan sections are unit-tested only. Next: L3.
 
 - 2026-11-18 (desktop): zTop for Linux, L1 (decision 0065): `desktop/` workspace with `ztop-desktop-core` (hosts.json, libsecret and 0600-file token stores, live/stale/unreachable/needs-pairing, card figures, reads and pairing through `ztop-core`; 17 tests incl. live agents and a real keyring) and the GTK4/libadwaita window. Recorded runs `desktop-overview.png`, `desktop-stale.png`, `desktop-unreachable.png`, `desktop-add-host.png`; a Desktop workflow runs `desktop/scripts/check.sh`. Next: L2, host detail.
+
+- 2026-11-19 (audit, medium): Fixed M1 to M6, M8 and M9, regression test first for each. The client parses bytes, caps responses at 32 MiB and gives a fetch one deadline, and the TUI restores the terminal on panic (0068; new fuzz target `parse_response`). Agent history is capped at an hour with two answers in flight (0069). Tokens are saved through a temporary file; a corrupt file is moved aside loudly (0070). Hub rows carry the hub's receive time (0071). Directories 0700, key and database 0600 at creation (0072). sqlx 0.9 clears RUSTSEC-2026-0459 and CI checks advisories (0073). M7 is left to the apt repository work. mDNS failures skip advertising; Linux reads only the sensor files it parses. Next: the full-hour budget run.
+
+- 2026-11-19 (servers): The `.deb` gains a system agent for servers: `ztop-agent.service` as the `ztop` user, state in `/var/lib/ztop`, address from `/etc/default/ztop-agent`, ordered after `tailscaled`, never pairing; `/usr/lib/ztop/pair-system-agent` pairs a read-only client over loopback (decision 0066). `packaging/check-deb.sh` tests the user, the pairing and the token's rights. Released as 0.1.2.
+
+- 2026-11-19 (apt): The `.deb` now installs into `/usr`, builds natively on Debian 12 for amd64 and arm64, adds zTop's signed apt repository, and installs with a one-line installer; Publish Linux Packages publishes a Packaging run to downloads.bristleconeit.com/ztop (decision 0065). `packaging/check-deb.sh` tests the installer and a signed upgrade in CI. Next: the `apt-publish` environment's secrets, a dry run, then the first apt release.
 
 - 2026-11-18 (audit): Fixed the audit findings, regression test first for each. Tracer requests all come from the tracer thread, so closing a trace detaches (0060). Control refuses pid 0, group pids and signals outside the catalog; token listing and revoking need the new `manage` right; pairing codes are eight symbols, burned by five wrong guesses and spaced a second apart; launchd logs leave /tmp (0061). The hub prunes past 24 h, stores history without process lists and caps windows at an hour (0062). The live Linux collector reads command lines, finds mounted disks by their diskstats name and keeps core numbers across offline cores (0063). One accept loop with deadlines and a connection cap serves the agent and the hub (0064). Next: merge, then the full-hour budget run.
 

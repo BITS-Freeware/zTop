@@ -110,25 +110,52 @@ impl Auth {
     }
 
     /// Auth backed by a tokens file (loaded if it exists).
+    ///
+    /// A file that exists but does not parse is moved aside to
+    /// `<name>.corrupt-<unix ms>`, with a line on stderr, and the agent
+    /// starts with no tokens at the same path, so new pairings persist
+    /// again. Before this (audit M3) a corrupt file silently turned the
+    /// agent into an in-memory store that never saved. A file that
+    /// cannot be read at all (permissions) is an error: starting
+    /// without it would hide the problem the same way.
     pub fn at(path: PathBuf) -> Result<Self, AuthError> {
         let mut auth = Self {
-            path: Some(path),
+            path: Some(path.clone()),
             tokens: HashMap::new(),
             pending: None,
             last_wrong_ms: None,
         };
-        auth.reload()?;
-        Ok(auth)
+        match auth.reload() {
+            Ok(()) => Ok(auth),
+            Err(AuthError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData => {
+                let mut aside = path.clone().into_os_string();
+                aside.push(format!(".corrupt-{}", now_ms()));
+                std::fs::rename(&path, &aside)?;
+                eprintln!(
+                    "ztop: the tokens file {} did not parse; moved it to {} and started \
+                     with no paired clients (pair again)",
+                    path.display(),
+                    std::path::Path::new(&aside).display()
+                );
+                auth.tokens.clear();
+                Ok(auth)
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    /// Re-read the tokens file, ignoring a missing file.
+    /// Re-read the tokens file. A missing file means no tokens; any
+    /// other read failure is an error, and a file that does not parse
+    /// is an `InvalidData` error.
     pub fn reload(&mut self) -> Result<(), AuthError> {
         self.tokens.clear();
         let Some(path) = &self.path else {
             return Ok(());
         };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Ok(());
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(AuthError::Io(error)),
         };
         let stored: Stored = serde_json::from_str(&text).map_err(|_| {
             AuthError::Io(std::io::Error::new(
@@ -144,6 +171,10 @@ impl Auth {
 
     /// Write the token hashes to disk, best effort: the agent serves
     /// even when the file cannot be written, and reports on stderr.
+    ///
+    /// The write goes to a temporary file beside the real one, created
+    /// 0600, synced, then renamed over it, so a crash mid-write leaves
+    /// either the old file or the new one, never half of one.
     pub fn save(&self) {
         let Some(path) = &self.path else {
             return;
@@ -157,26 +188,7 @@ impl Auth {
             Ok(text) => text,
             Err(_) => return,
         };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // 0600 on unix: the file holds credentials' hashes, and only
-        // the agent's user should read them.
-        #[cfg(unix)]
-        let write = {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)
-                .and_then(|mut file| file.write_all(text.as_bytes()))
-        };
-        #[cfg(not(unix))]
-        let write = std::fs::write(path, text);
-        if let Err(error) = write {
+        if let Err(error) = write_atomically(path, text.as_bytes()) {
             eprintln!("ztop-agent: could not save tokens: {error}");
         }
     }
@@ -336,6 +348,36 @@ fn same_code(expected: &[u8], guess: &[u8]) -> bool {
 }
 
 /// Lowercase hex, std-only.
+/// Replace `path` with `bytes`: write a 0600 temporary file in the same
+/// directory (created 0700 if missing), sync it, and rename it over the
+/// target. Rename within one directory is atomic on every platform the
+/// agent runs on.
+pub fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        ztop_core::paths::create_private_dir(parent)?;
+    }
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".tmp-{}", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options.open(&temporary).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    if let Err(error) = written.and_then(|()| std::fs::rename(&temporary, path)) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -491,6 +533,61 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("file");
         assert!(!text.contains(&token), "the raw token must never be stored");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression (audit M3): a tokens file that did not parse made
+    /// the agent fall back to an in-memory store, silently: every
+    /// client was unpaired and new pairings were never saved.
+    #[test]
+    fn a_corrupt_tokens_file_is_moved_aside_and_pairings_persist_again() {
+        let dir = std::env::temp_dir().join(format!("ztop-auth-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("tokens.json");
+        // What a crash halfway through the old truncate-then-write left.
+        std::fs::write(&path, "{\"tokens\": [{\"id\": \"ab").expect("write");
+
+        let mut auth = Auth::at(path.clone()).expect("a corrupt file is not fatal");
+        assert!(auth.list().is_empty());
+        let aside: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "the corrupt file is kept for a look");
+
+        auth.start_pairing("the app".into(), NOW, vec!["read".to_string()])
+            .expect("code");
+        let code = auth.pending_code().expect("pending");
+        let token = auth.pair(&code, NOW).expect("token");
+        assert!(
+            Auth::at(path.clone()).expect("reload").check(&token),
+            "a pairing after the recovery is saved"
+        );
+        // No temporary file is left behind.
+        assert!(
+            std::fs::read_dir(&dir)
+                .expect("list")
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_tokens_file_is_an_error_not_an_empty_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ztop-auth-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        // A directory where the file should be cannot be read as text,
+        // even by root, which ignores mode bits.
+        let path = dir.join("tokens.json");
+        std::fs::create_dir(&path).expect("dir in the way");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        assert!(Auth::at(path).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

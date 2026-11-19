@@ -1069,6 +1069,32 @@ fn parse_hwmon(dir_name: &str, files: &[(String, String)]) -> (Vec<TempSensor>, 
     (temps, fans)
 }
 
+/// Whether the live collector reads this hwmon attribute: exactly the
+/// files [`parse_hwmon`] uses (`name`, `tempN_input`, `tempN_label`,
+/// `fanN_input`).
+#[cfg(any(target_os = "linux", test))]
+fn hwmon_file_is_read(name: &str) -> bool {
+    let numbered = |prefix: &str, suffix: &str| {
+        name.strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+    };
+    name == "name"
+        || numbered("temp", "_input")
+        || numbered("temp", "_label")
+        || numbered("fan", "_input")
+}
+
+/// Whether the live collector reads this power-supply attribute:
+/// exactly the files [`parse_power_supply`] uses.
+#[cfg(any(target_os = "linux", test))]
+fn power_supply_file_is_read(name: &str) -> bool {
+    matches!(
+        name,
+        "capacity" | "status" | "power_now" | "current_now" | "voltage_now"
+    )
+}
+
 /// Parses one `/sys/class/power_supply/<supply>` directory.
 ///
 /// Returns `None` when the supply reports no `capacity`, which is how
@@ -1368,12 +1394,12 @@ mod live {
 
     use super::{
         CpuTimes, PidData, PidIo, PidStat, USER_HZ, counter_rate, detect_container, disk_usage,
-        io_rates, live_core_percents, live_device_name, memory_from, parse_cpuinfo_frequencies,
-        parse_hwmon, parse_pid_cmdline, parse_pid_io, parse_pid_stat, parse_pid_statm,
-        parse_pid_status, parse_power_supply, parse_pressure, parse_proc_diskstats,
-        parse_proc_loadavg, parse_proc_loadavg_entities, parse_proc_meminfo,
+        hwmon_file_is_read, io_rates, live_core_percents, live_device_name, memory_from,
+        parse_cpuinfo_frequencies, parse_hwmon, parse_pid_cmdline, parse_pid_io, parse_pid_stat,
+        parse_pid_statm, parse_pid_status, parse_power_supply, parse_pressure,
+        parse_proc_diskstats, parse_proc_loadavg, parse_proc_loadavg_entities, parse_proc_meminfo,
         parse_proc_mounts_with, parse_proc_net_dev, parse_proc_stat, parse_proc_uptime,
-        process_row, system_text,
+        power_supply_file_is_read, process_row, system_text,
     };
     use crate::collector::{CollectError, Collector};
     use crate::model::{
@@ -1545,7 +1571,8 @@ mod live {
             let mut fans: Vec<Fan> = Vec::new();
             for hwmon in read_dir_names(Path::new("/sys/class/hwmon")) {
                 let dir = Path::new("/sys/class/hwmon").join(&hwmon);
-                let (mut chip_temps, mut chip_fans) = parse_hwmon(&hwmon, &read_pairs(&dir));
+                let (mut chip_temps, mut chip_fans) =
+                    parse_hwmon(&hwmon, &read_pairs(&dir, hwmon_file_is_read));
                 temps.append(&mut chip_temps);
                 fans.append(&mut chip_fans);
             }
@@ -1554,6 +1581,7 @@ mod live {
                 .filter_map(|supply| {
                     parse_power_supply(&read_pairs(
                         &Path::new("/sys/class/power_supply").join(supply),
+                        power_supply_file_is_read,
                     ))
                 })
                 .next();
@@ -1721,17 +1749,22 @@ mod live {
 
     /// Sorted `(file name, contents)` pairs of one directory's files,
     /// skipping subdirectories and unreadable files.
-    fn read_pairs(path: &Path) -> Vec<(String, String)> {
+    /// The `(name, contents)` pairs of the files in `path` that `wanted`
+    /// accepts by name. Only those are opened: some hwmon drivers run a
+    /// bus transaction on every read, and a directory holds many
+    /// attributes the parsers never look at (audit M9).
+    fn read_pairs(path: &Path, wanted: fn(&str) -> bool) -> Vec<(String, String)> {
         let Ok(entries) = fs::read_dir(path) else {
             return Vec::new();
         };
         let mut pairs = Vec::new();
         for entry in entries.flatten() {
-            if entry.path().is_dir() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !wanted(&name) || entry.path().is_dir() {
                 continue;
             }
             if let Ok(text) = fs::read_to_string(entry.path()) {
-                pairs.push((entry.file_name().to_string_lossy().into_owned(), text));
+                pairs.push((name, text));
             }
         }
         pairs.sort();
@@ -2145,6 +2178,47 @@ mod tests {
         assert_eq!(stat.utime_jiffies, 0);
         assert_eq!(stat.stime_jiffies, 0);
         assert!(parse_pid_stat("no parens here\n").is_none());
+    }
+
+    /// Regression (audit M9): every file in every hwmon and power-supply
+    /// directory was read on each sample, though the parsers use a few.
+    #[test]
+    fn only_the_attributes_the_parsers_use_are_read() {
+        for name in ["name", "temp1_input", "temp12_label", "fan2_input"] {
+            assert!(hwmon_file_is_read(name), "{name}");
+        }
+        for name in [
+            "temp1_max",
+            "temp1_crit_alarm",
+            "fan1_min",
+            "in0_input",
+            "power1_average",
+            "uevent",
+            "temp_input",
+            "tempx_input",
+        ] {
+            assert!(!hwmon_file_is_read(name), "{name}");
+        }
+        for name in [
+            "capacity",
+            "status",
+            "power_now",
+            "current_now",
+            "voltage_now",
+        ] {
+            assert!(power_supply_file_is_read(name), "{name}");
+        }
+        for name in ["uevent", "serial_number", "model_name", "charge_full"] {
+            assert!(!power_supply_file_is_read(name), "{name}");
+        }
+        // Everything the parsers read passes the filters.
+        let files = [
+            ("name", "coretemp"),
+            ("temp1_input", "42000"),
+            ("temp1_label", "Package id 0"),
+            ("fan1_input", "1200"),
+        ];
+        assert!(files.iter().all(|(name, _)| hwmon_file_is_read(name)));
     }
 
     #[test]

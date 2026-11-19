@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# System service for servers with nobody logged in. The .deb installs it as
+# /usr/lib/systemd/system/ztop-agent.service, disabled. Turn it on with:
+#
+#     sudo systemctl enable --now ztop-agent
+#
+# It runs as the unprivileged `ztop` user (packaging/systemd/system/ztop.sysusers),
+# keeps its certificate and tokens in /var/lib/ztop, and serves TLS on 127.0.0.1
+# until /etc/default/ztop-agent names a wider address with --bind. It never pairs
+# and never allows control or token management: see packaging/README.md for how
+# to pair a client.
+#
+# After= orders it behind a private network such as Tailscale when one is installed,
+# so the address it binds usually exists by then. If it doesn't yet, the bind fails
+# and systemd tries again every five seconds.
+
+[Unit]
+Description=zTop agent: this machine's metrics over the zTop protocol
+Documentation=man:ztop(1) https://github.com/BITS-Freeware/zTop
+After=network-online.target tailscaled.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ztop
+Group=ztop
+# The agent keeps its files in $XDG_CONFIG_HOME/ztop: /var/lib/ztop/ztop.
+Environment=HOME=/var/lib/ztop XDG_CONFIG_HOME=/var/lib/ztop
+EnvironmentFile=-/etc/default/ztop-agent
+ExecStart=/usr/bin/ztop agent --tls --no-advertise $ZTOP_AGENT_ARGS
+Restart=always
+RestartSec=5
+StateDirectory=ztop
+StateDirectoryMode=0700
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

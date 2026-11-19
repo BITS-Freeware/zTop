@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# The user the system agent runs as: no login shell, no password, home in its state directory.
+u ztop - "zTop agent" /var/lib/ztop /usr/sbin/nologin

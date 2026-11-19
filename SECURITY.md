@@ -15,8 +15,11 @@ will be credited in the changelog if you want to be.
 
 ## What zTop guarantees
 
-- The agent and the hub are read-only. There is no remote command execution
-  and no shell, by design — not a disabled feature, an absent one.
+- There is no remote command execution and no shell, by design — not a
+  disabled feature, an absent one. The agent and the hub are read-only by
+  default; the one way to act on a machine is sending a signal from a fixed
+  catalog to, or renicing, one named process, and only when the agent runs
+  with `--allow-control` and the token holds the `control` right.
 - The agent and hub bind to the loopback interface until explicitly
   configured otherwise. Serving beyond loopback requires TLS and pairing;
   without TLS, other addresses are refused.

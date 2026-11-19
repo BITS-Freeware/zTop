@@ -112,7 +112,7 @@ fn stdout_file() -> Option<std::fs::File> {
 /// moment it exists.
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        ztop_core::paths::create_private_dir(parent)?;
     }
     // A fresh file each time: removing first means an existing file's
     // looser mode (or a planted link) is never reused.
