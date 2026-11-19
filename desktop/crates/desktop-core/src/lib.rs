@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The zTop Linux app's logic, kept apart from GTK so it is tested
 //! without a display: the saved hosts, the token store, each host's
-//! live state, the numbers a fleet card shows, and the calls to an
+//! live state, the numbers a fleet card shows, a host's recent history
+//! for its detail page, and the calls to an
 //! agent or hub through `ztop-core`'s own client.
 
 pub mod agent;
 pub mod freshness;
+pub mod history;
 pub mod hosts;
 pub mod summary;
 pub mod tokens;
 
 pub use agent::{NewHost, ReadError};
 pub use freshness::{HostLive, HostState};
+pub use history::History;
 pub use hosts::{HostRecord, HostRegistry};
 pub use summary::CardSummary;
 pub use tokens::{FileTokenStore, TokenStore};

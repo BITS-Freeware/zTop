@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **zTop for Linux** (`desktop/`): a GTK4 and libadwaita desktop app. Add an agent or hub by address, TLS fingerprint and pairing code; every host gets a card with its live, stale, unreachable or needs-pairing state, CPU, memory and uptime. Tokens go to the desktop keyring (decision 0065).
+- **zTop for Linux, host detail:** click a card for 15 minutes of charts (CPU, memory and swap, load, disk and network rates, temperatures, fans), a bar per core and a row per mounted disk (decision 0066).
+- `RemoteCollector::history` in `ztop-core` reads an agent's or hub's `/v1/history`.
 
 ## [0.1.0] - 2026-11-18
 

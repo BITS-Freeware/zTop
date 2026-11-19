@@ -219,3 +219,33 @@ fn a_plain_loopback_agent_reads_without_pairing() {
     let sample = read_soon(&record, None).expect("a plain loopback read");
     assert!(!sample.cpu.cores.is_empty());
 }
+
+#[test]
+fn the_detail_page_history_comes_from_the_agent_in_time_order() {
+    let Some(bin) = agent_binary() else { return };
+    let agent = start_agent(&bin, true);
+    let record = HostRecord::new("host-a", "127.0.0.1", agent.port, &agent.pin);
+    let token = agent::pair(&record, &agent.code).expect("pairing with the printed code");
+    read_soon(&record, Some(token.clone())).expect("a paired read");
+    // The agent samples once a second; give it a few.
+    std::thread::sleep(Duration::from_secs(3));
+
+    let samples = agent::history(&record, Some(token.clone()), 60).expect("the agent's history");
+    assert!(samples.len() >= 2, "only {} samples", samples.len());
+    assert!(
+        samples
+            .windows(2)
+            .all(|w| w[0].timestamp_ms < w[1].timestamp_ms),
+        "the history is oldest first"
+    );
+    let mut history = ztop_desktop_core::History::default();
+    history.extend(samples);
+    assert!(!history.cpu().is_empty());
+    assert_eq!(history.load().len(), 3);
+
+    // Without the token the history is refused like a snapshot.
+    assert_eq!(
+        agent::history(&record, None, 60).unwrap_err(),
+        ReadError::NeedsPairing
+    );
+}

@@ -2,14 +2,16 @@
 
 Updated after every working session.
 
-- **Current milestone:** zTop for Linux, L1 (fleet list and pairing), after the 0.1.0 release.
-- **Last done:** zTop for Linux L1, a GTK4 desktop app in `desktop/` (decision 0065), after the five audit fixes (decisions 0060-0064) merged.
-- **Next step:** zTop for Linux L2 (host detail); measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
+- **Current milestone:** zTop for Linux, L2 (host detail), after the 0.1.0 release.
+- **Last done:** zTop for Linux L2, the host detail page (decision 0066), recorded against a live agent.
+- **Next step:** a recorded detail run on a machine with temperature sensors and fans; then L3 (processes and control); measure the agent's budget over a full hour on a busy macOS and Linux host, and record it.
 - **Blocked on:** nothing.
 
 ## Log
 
 Newest first. One or two lines per session: what changed, what is next.
+
+- 2026-11-19: zTop for Linux L2 (decision 0066): a card click opens the host's detail page, seeded from the agent's `/v1/history` (new `RemoteCollector::history` in `ztop-core`) and then fed by the fleet poll; cairo charts with a 1-2-5 scale and a span that grows with the held history, per-core bars, disk rows. New check.sh stage `recorded-detail` (`ZTOP_DESKTOP_DETAIL`, `ZTOP_DESKTOP_SIZE` hooks). The recording machine has no sensors, so the temperature and fan sections are unit-tested only. Next: L3.
 
 - 2026-11-18 (desktop): zTop for Linux, L1 (decision 0065): `desktop/` workspace with `ztop-desktop-core` (hosts.json, libsecret and 0600-file token stores, live/stale/unreachable/needs-pairing, card figures, reads and pairing through `ztop-core`; 17 tests incl. live agents and a real keyring) and the GTK4/libadwaita window. Recorded runs `desktop-overview.png`, `desktop-stale.png`, `desktop-unreachable.png`, `desktop-add-host.png`; a Desktop workflow runs `desktop/scripts/check.sh`. Next: L2, host detail.
 

@@ -32,7 +32,23 @@ impl fmt::Display for ReadError {
 
 /// Reads one snapshot from `record`, with `token` when it has one.
 pub fn read(record: &HostRecord, token: Option<String>) -> Result<Sample, ReadError> {
-    let mut collector = if record.pin.is_empty() {
+    let mut collector = collector(record, token)?;
+    collector.sample().map_err(read_error)
+}
+
+/// Reads the agent's samples from the last `seconds`, oldest first.
+pub fn history(
+    record: &HostRecord,
+    token: Option<String>,
+    seconds: u64,
+) -> Result<Vec<Sample>, ReadError> {
+    collector(record, token)?
+        .history(seconds)
+        .map_err(read_error)
+}
+
+fn collector(record: &HostRecord, token: Option<String>) -> Result<RemoteCollector, ReadError> {
+    Ok(if record.pin.is_empty() {
         RemoteCollector::new(record.target())
     } else {
         if token.is_none() {
@@ -42,8 +58,11 @@ pub fn read(record: &HostRecord, token: Option<String>) -> Result<Sample, ReadEr
         }
         RemoteCollector::tls(record.target(), &record.pin, token)
             .map_err(|e| ReadError::Failed(e.to_string()))?
-    };
-    collector.sample().map_err(|error| match error {
+    })
+}
+
+fn read_error(error: CollectError) -> ReadError {
+    match error {
         // `ztop-core`'s client words a 401 this way (client.rs); the
         // live test that reads unpaired keeps the two in step.
         CollectError::Unavailable {
@@ -52,7 +71,7 @@ pub fn read(record: &HostRecord, token: Option<String>) -> Result<Sample, ReadEr
         } if what.contains("(401)") => ReadError::NeedsPairing,
         CollectError::Io(io) => ReadError::Failed(format!("could not reach the agent: {io}")),
         other => ReadError::Failed(other.to_string()),
-    })
+    }
 }
 
 /// Trades a pairing code for a token over pinned TLS.

@@ -31,6 +31,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The protocol paths the client fetches.
 pub const SNAPSHOT_PATH: &str = "/v1/snapshot";
+/// The recent-samples route; `?seconds=N` bounds the window.
+pub const HISTORY_PATH: &str = "/v1/history";
 
 /// The control route a remote plan is POSTed to.
 const CONTROL_PATH: &str = "/v1/control";
@@ -223,17 +225,14 @@ fn tls_error(error: rustls::Error) -> CollectError {
     }
 }
 
-impl Collector for RemoteCollector {
-    fn sample(&mut self) -> Result<Sample, CollectError> {
+impl RemoteCollector {
+    /// `GET path` on the agent or hub, over pinned TLS when configured,
+    /// and the envelope opened after its protocol check.
+    fn fetch_envelope(&self, path: &str) -> Result<serde_json::Value, CollectError> {
         let body = match (&self.tls, &self.token) {
             (Some(config), token) => {
-                let (status, text) = https_get(
-                    &self.target,
-                    SNAPSHOT_PATH,
-                    config,
-                    token.as_deref(),
-                    self.timeout,
-                )?;
+                let (status, text) =
+                    https_get(&self.target, path, config, token.as_deref(), self.timeout)?;
                 // A refused token is a pairing problem, not a broken
                 // agent: say so instead of a generic failure.
                 if status == 401 {
@@ -244,7 +243,7 @@ impl Collector for RemoteCollector {
                 }
                 text
             }
-            (None, _) => http_get(&self.target, SNAPSHOT_PATH, self.timeout)?,
+            (None, _) => http_get(&self.target, path, self.timeout)?,
         };
         // Clients check the protocol version before the payload
         // (decision 0035): a newer agent's envelope is a mismatch, not
@@ -261,7 +260,25 @@ impl Collector for RemoteCollector {
                 what: "protocol version 1",
             });
         }
-        serde_json::from_value(envelope["sample"].clone()).map_err(|_| CollectError::Unavailable {
+        Ok(envelope)
+    }
+
+    /// `GET /v1/history?seconds=N`: the agent's samples from the last
+    /// `seconds`, oldest first. The agent's ring drops process lists,
+    /// so these samples carry none.
+    pub fn history(&self, seconds: u64) -> Result<Vec<Sample>, CollectError> {
+        let mut envelope = self.fetch_envelope(&format!("{HISTORY_PATH}?seconds={seconds}"))?;
+        serde_json::from_value(envelope["samples"].take()).map_err(|_| CollectError::Unavailable {
+            origin: "agent",
+            what: "an understandable history",
+        })
+    }
+}
+
+impl Collector for RemoteCollector {
+    fn sample(&mut self) -> Result<Sample, CollectError> {
+        let mut envelope = self.fetch_envelope(SNAPSHOT_PATH)?;
+        serde_json::from_value(envelope["sample"].take()).map_err(|_| CollectError::Unavailable {
             origin: "agent",
             what: "an understandable sample",
         })

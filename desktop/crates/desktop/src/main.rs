@@ -5,6 +5,7 @@
 
 mod app;
 mod card;
+mod detail;
 mod dialogs;
 mod hooks;
 mod secret;

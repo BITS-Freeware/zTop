@@ -5,7 +5,7 @@
 # live tests and the recorded run spawn it), format and lint, the
 # tests (live agents, and the Secret Service store against a throwaway
 # gnome-keyring in its own D-Bus session), then the recorded run with
-# two paired agents.
+# two paired agents, on the fleet and on a host's detail page.
 set -eu
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
@@ -43,5 +43,6 @@ run test env HOME="$KEYHOME" dbus-run-session -- sh -c '
     eval "$(printf test | gnome-keyring-daemon --unlock --components=secrets)"
     ZTOP_TEST_KEYRING=1 cargo test --manifest-path desktop/Cargo.toml'
 run recorded-run desktop/scripts/recorded-run.sh "$KEYHOME/overview.png"
+run recorded-detail env DETAIL=host-a SNAPSHOT_AFTER=12 desktop/scripts/recorded-run.sh "$KEYHOME/detail.png"
 
 echo "check: all linux stages ok"

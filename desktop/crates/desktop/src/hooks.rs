@@ -6,6 +6,11 @@
 //!   that name, as `name|address|port|fingerprint|code` entries joined
 //!   by `;` (fingerprint and code empty for a plain loopback agent).
 //! - `ZTOP_DESKTOP_OPEN=add`: open the add-host dialog at start.
+//! - `ZTOP_DESKTOP_SIZE=<width>x<height>`: the window's size, so a
+//!   recorded page fits in one picture.
+//! - `ZTOP_DESKTOP_DETAIL=<name>`: open that host's detail page once
+//!   it has a live sample; the snapshot report then names the sections
+//!   the page shows and how many samples it holds.
 //! - `ZTOP_DESKTOP_SNAPSHOT=<file.png>`: after
 //!   `ZTOP_DESKTOP_SNAPSHOT_AFTER` seconds (default 8), draw the window
 //!   into that PNG and quit. The app's own render, so no screen capture
@@ -29,6 +34,15 @@ pub fn run(fleet: &Rc<Fleet>) {
     if let Ok(seed) = std::env::var("ZTOP_DESKTOP_SEED") {
         seed_hosts(fleet, &seed);
     }
+    if let Some((width, height)) = std::env::var("ZTOP_DESKTOP_SIZE").ok().and_then(|s| {
+        let (w, h) = s.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    }) {
+        fleet.window.set_default_size(width, height);
+    }
+    if let Ok(name) = std::env::var("ZTOP_DESKTOP_DETAIL") {
+        open_detail_when_live(fleet, name);
+    }
     if let Ok(path) = std::env::var("ZTOP_DESKTOP_SNAPSHOT") {
         let after = std::env::var("ZTOP_DESKTOP_SNAPSHOT_AFTER")
             .ok()
@@ -45,11 +59,38 @@ pub fn run(fleet: &Rc<Fleet>) {
             for (name, state) in fleet.states() {
                 eprintln!("ztop-desktop: host {name} {state}");
             }
+            if let Some(detail) = fleet.detail.borrow().as_ref() {
+                eprintln!("ztop-desktop: detail samples {}", detail.samples());
+                for section in detail.visible_sections() {
+                    eprintln!("ztop-desktop: detail shows {section}");
+                }
+            }
             if let Some(app) = fleet.window.application() {
                 app.quit();
             }
         });
     }
+}
+
+/// Checks twice a second until the named host is live, then opens it.
+fn open_detail_when_live(fleet: &Rc<Fleet>, name: String) {
+    let fleet = Rc::downgrade(fleet);
+    glib::timeout_add_local(Duration::from_millis(500), move || {
+        let Some(fleet) = fleet.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let live = fleet
+            .states()
+            .into_iter()
+            .any(|(n, state)| n == name && state == "live");
+        if !live {
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(record) = fleet.records().into_iter().find(|r| r.name == name) {
+            fleet.open_detail(&record.id);
+        }
+        glib::ControlFlow::Break
+    });
 }
 
 fn seed_hosts(fleet: &Rc<Fleet>, seed: &str) {

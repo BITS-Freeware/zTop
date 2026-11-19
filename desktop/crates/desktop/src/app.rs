@@ -15,6 +15,7 @@ use ztop_desktop_core::freshness::POLL_INTERVAL;
 use ztop_desktop_core::{FileTokenStore, HostLive, HostRecord, HostRegistry, TokenStore, agent};
 
 use crate::card::Card;
+use crate::detail::Detail;
 use crate::secret::SecretServiceStore;
 
 const CSS: &str = r#"
@@ -44,6 +45,7 @@ pub fn load_css() {
 pub struct Fleet {
     pub window: adw::ApplicationWindow,
     pub toasts: adw::ToastOverlay,
+    nav: adw::NavigationView,
     stack: gtk::Stack,
     flow: gtk::FlowBox,
     banner: adw::Banner,
@@ -55,6 +57,8 @@ pub struct Fleet {
     live: RefCell<HashMap<String, HostLive>>,
     cards: RefCell<HashMap<String, Card>>,
     in_flight: RefCell<HashSet<String>>,
+    /// The open detail page, if any; it follows its host's polls.
+    pub detail: RefCell<Option<Rc<Detail>>>,
 }
 
 pub fn activate(application: &adw::Application) {
@@ -116,12 +120,19 @@ impl Fleet {
         stack.add_named(&scroller, Some("fleet"));
         stack.set_visible_child_name("loading");
 
-        let toasts = adw::ToastOverlay::new();
-        toasts.set_child(Some(&stack));
         let view = adw::ToolbarView::new();
         view.add_top_bar(&header);
         view.add_top_bar(&banner);
-        view.set_content(Some(&toasts));
+        view.set_content(Some(&stack));
+        let fleet_page = adw::NavigationPage::builder()
+            .title("zTop")
+            .tag("fleet")
+            .child(&view)
+            .build();
+        let nav = adw::NavigationView::new();
+        nav.add(&fleet_page);
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(&nav));
 
         let window = adw::ApplicationWindow::builder()
             .application(application)
@@ -130,12 +141,13 @@ impl Fleet {
             .default_height(640)
             .width_request(360)
             .height_request(300)
-            .content(&view)
+            .content(&toasts)
             .build();
 
         let fleet = Rc::new(Self {
             window,
             toasts,
+            nav,
             stack,
             flow,
             banner,
@@ -145,7 +157,17 @@ impl Fleet {
             live: RefCell::new(HashMap::new()),
             cards: RefCell::new(HashMap::new()),
             in_flight: RefCell::new(HashSet::new()),
+            detail: RefCell::new(None),
         });
+        {
+            let flow = fleet.flow.clone();
+            let fleet = Rc::downgrade(&fleet);
+            flow.connect_child_activated(move |_, child| {
+                if let Some(fleet) = fleet.upgrade() {
+                    fleet.open_detail(&child.widget_name());
+                }
+            });
+        }
         for button in [&add, &add_first] {
             let fleet = fleet.clone();
             button.connect_clicked(move |_| crate::dialogs::add_host(&fleet));
@@ -245,6 +267,9 @@ impl Fleet {
     fn add_card(self: &Rc<Self>, record: &HostRecord) {
         let card = Card::new(record);
         let id = record.id.clone();
+        // The flow box names each child by its host, so activating a
+        // card finds its record.
+        card.root.set_widget_name(&id);
         {
             let fleet = self.clone();
             let id = id.clone();
@@ -323,6 +348,43 @@ impl Fleet {
         self.refresh_stack();
     }
 
+    /// Pushes the detail page for host `id` and reads the agent's
+    /// history for it on a worker thread.
+    pub fn open_detail(self: &Rc<Self>, id: &str) {
+        let Some(record) = self.records().into_iter().find(|r| r.id == id) else {
+            return;
+        };
+        let detail = Detail::new(&record);
+        {
+            let fleet = Rc::downgrade(self);
+            let id = record.id.clone();
+            detail.page.connect_hidden(move |_| {
+                if let Some(fleet) = fleet.upgrade() {
+                    let mut open = fleet.detail.borrow_mut();
+                    if open.as_ref().is_some_and(|d| d.id == id) {
+                        *open = None;
+                    }
+                }
+            });
+        }
+        // The newest polled sample shows at once; the history fills in
+        // behind it.
+        if let Some(sample) = self.live.borrow().get(id).and_then(|l| l.sample.clone()) {
+            detail.push(sample);
+        }
+        *self.detail.borrow_mut() = Some(detail.clone());
+        self.nav.push(&detail.page);
+        let token = self.tokens.borrow().get(id).cloned();
+        glib::spawn_future_local(async move {
+            let seconds = ztop_desktop_core::history::WINDOW_SECONDS;
+            let result = gio::spawn_blocking(move || agent::history(&record, token, seconds))
+                .await
+                .unwrap_or_else(|_| Err(agent::ReadError::Failed("the read crashed".into())))
+                .map_err(|e| e.to_string());
+            detail.seed(result);
+        });
+    }
+
     fn poll_all(self: &Rc<Self>) {
         for record in self.records() {
             self.poll(&record);
@@ -348,9 +410,18 @@ impl Fleet {
             let cards = fleet.cards.borrow();
             let Some(card) = cards.get(&id) else { return };
             let mut live = fleet.live.borrow_mut();
+            let entry_id = id.clone();
             let entry = live.entry(id).or_default();
             entry.apply(result, Instant::now());
             card.show(entry);
+            let fresh = entry.state == ztop_desktop_core::HostState::Live;
+            if let (true, Some(sample), Some(detail)) =
+                (fresh, entry.sample.clone(), fleet.detail.borrow().clone())
+            {
+                if detail.id == entry_id {
+                    detail.push(sample);
+                }
+            }
         });
     }
 }
