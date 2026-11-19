@@ -89,11 +89,9 @@ ED6D`, expires 2029-11-08).
   through a repository signed with a throwaway key. The Packaging
   workflow runs both on Debian 12 for amd64 and arm64 and keeps the
   packages as the `ztop-linux-amd64` and `ztop-linux-arm64` artifacts.
-- **Publish Linux Packages** (`.github/workflows/publish-linux.yml`),
-  run by hand from main with a Packaging run's number, signs the
+- Publishing happens outside this repository, which holds no signing
+  key and no credentials for the downloads site (decision 0074). The
+  publishing job takes a Packaging run's two artifacts, signs the
   repository with `packaging/build-apt-repo.sh` and uploads it, the
-  latest links and the installer. Its secrets live in the `apt-publish`
-  environment, which only main can deploy to: `APT_SIGNING_KEY` (the
-  signing subkey only), `APT_SIGNING_KEY_PASSPHRASE`, `R2_ACCESS_KEY_ID`,
-  `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT` and `R2_BUCKET`. Try it first
-  with `dry_run`.
+  latest links and the installer. Never add publishing secrets or
+  environments to this repository.
