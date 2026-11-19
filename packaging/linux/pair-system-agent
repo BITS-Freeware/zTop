@@ -1,0 +1,76 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Pairs one read-only client with this machine's system agent (ztop-agent.service), without the
+# pairing code ever reaching a log or the network.
+#
+#   sudo /usr/lib/ztop/pair-system-agent [--port N]
+#
+# It starts a second agent as the `ztop` user on 127.0.0.1:N (default 7199) with --pair, reading
+# the pairing code from a file only root can read, trades the code for a token over loopback, then
+# stops that agent. Both agents share /var/lib/ztop, so the token and the certificate are the
+# service's own. If the service is running, it restarts to load the new token.
+#
+# Prints one line of JSON on standard output: {"pin":"SHA256:<hex>","token":"<hex>"}. The token is
+# a credential: hand it straight to the client that will use it (a hub's agents file, or a
+# password manager), never to a log. The token can read metrics only: no signals, no renice, no
+# token management.
+set -euo pipefail
+umask 077
+
+PORT=7199
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --port) PORT="$2"; shift 2 ;;
+    -h|--help) sed -n '4,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "Unknown option $1" >&2; exit 2 ;;
+  esac
+done
+case "$PORT" in ''|*[!0-9]*) echo "--port must be a number" >&2; exit 2 ;; esac
+[ "$(id -u)" -eq 0 ] || { echo "Run it as root: it runs the agent as the ztop user." >&2; exit 1; }
+id ztop >/dev/null 2>&1 || { echo "There is no ztop user; reinstall the ztop package." >&2; exit 1; }
+
+STATE=/var/lib/ztop
+ZTOP=/usr/bin/ztop
+install -d -o ztop -g ztop -m 700 "$STATE"
+WORK="$(mktemp -d)"
+AGENT=""
+cleanup() {
+  if [ -n "$AGENT" ]; then kill "$AGENT" 2>/dev/null || true; wait "$AGENT" 2>/dev/null || true; fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+# Root opens the output file (mode 0600, owned by root), so the agent judges it private and
+# prints the code there; nobody but root can read it.
+runuser -u ztop -- env HOME="$STATE" XDG_CONFIG_HOME="$STATE" \
+  "$ZTOP" agent --tls --pair --no-advertise --bind 127.0.0.1 --port "$PORT" >"$WORK/agent.out" 2>&1 &
+AGENT=$!
+
+CODE=""; PIN=""
+for _ in $(seq 1 100); do
+  CODE="$(sed -n 's/^Pairing code: \([A-Za-z0-9]*\) (valid.*/\1/p' "$WORK/agent.out")"
+  PIN="$(sed -n 's/^TLS fingerprint: \(SHA256:[0-9a-f]*\)$/\1/p' "$WORK/agent.out")"
+  [ -n "$CODE" ] && [ -n "$PIN" ] && break
+  kill -0 "$AGENT" 2>/dev/null || break
+  sleep 0.1
+done
+if [ -z "$CODE" ] || [ -z "$PIN" ]; then
+  echo "The pairing agent didn't start:" >&2
+  grep -v '^Pairing code:' "$WORK/agent.out" >&2 || true
+  exit 1
+fi
+
+# The client side: a throwaway state directory, so the token lands in a file this script reads
+# and then deletes.
+mkdir -p "$WORK/client"
+HOME="$WORK/client" XDG_CONFIG_HOME="$WORK/client" \
+  "$ZTOP" connect --tls --pin "$PIN" --code "$CODE" "127.0.0.1:$PORT" --once >/dev/null
+TOKEN="$(sed -n 's/^ *"token": "\([0-9a-f]*\)".*/\1/p' "$WORK/client/ztop/hosts/127.0.0.1_$PORT.json")"
+[ -n "$TOKEN" ] || { echo "Pairing succeeded but no token was saved." >&2; exit 1; }
+
+kill "$AGENT"; wait "$AGENT" 2>/dev/null || true; AGENT=""
+if systemctl is-active --quiet ztop-agent.service 2>/dev/null; then
+  systemctl restart ztop-agent.service
+fi
+printf '{"pin":"%s","token":"%s"}\n' "$PIN" "$TOKEN"

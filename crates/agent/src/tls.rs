@@ -28,9 +28,10 @@ pub struct TlsMaterial {
 }
 
 /// Load the agent's certificate and key from `dir`, creating a fresh
-/// self-signed pair when they are missing. The key is written 0600.
+/// self-signed pair when they are missing. The directory is 0700 and the
+/// key is 0600 from the moment it exists.
 pub fn load_or_create(dir: &Path) -> io::Result<TlsMaterial> {
-    fs::create_dir_all(dir)?;
+    ztop_core::paths::create_private_dir(dir)?;
     let cert_path = dir.join("agent-cert.pem");
     let key_path = dir.join("agent-key.pem");
     if !cert_path.exists() || !key_path.exists() {
@@ -79,13 +80,11 @@ fn generate(cert_path: &Path, key_path: &Path) -> io::Result<()> {
     let cert = params
         .self_signed(&key)
         .map_err(|error| io::Error::other(format!("self-signing: {error}")))?;
-    fs::write(cert_path, cert.pem())?;
-    fs::write(key_path, key.serialize_pem())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(key_path, fs::Permissions::from_mode(0o600))?;
-    }
+    // Both through a 0600 temporary file and a rename: the key was
+    // written with the default umask and only then tightened, which
+    // left a moment where other users could read it (audit M6).
+    crate::auth::write_atomically(key_path, key.serialize_pem().as_bytes())?;
+    crate::auth::write_atomically(cert_path, cert.pem().as_bytes())?;
     Ok(())
 }
 
@@ -106,4 +105,27 @@ pub async fn serve_on_tls(
     config: rustls::ServerConfig,
 ) -> io::Result<()> {
     crate::serving::serve(listener, Some(config), crate::router(state)).await
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// Regression (audit M6): the key was written with the default
+    /// umask, then changed to 0600, and the directory was 0755.
+    #[test]
+    fn the_key_and_its_directory_are_private_from_the_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("ztop-tls-perm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let dir = base.join("state");
+        let first = load_or_create(&dir).expect("creates");
+        let mode = |path: &Path| fs::metadata(path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("agent-key.pem")), 0o600);
+        // A second start loads the same pair.
+        let again = load_or_create(&dir).expect("loads");
+        assert_eq!(first.fingerprint, again.fingerprint);
+        let _ = fs::remove_dir_all(&base);
+    }
 }

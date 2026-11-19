@@ -14,7 +14,7 @@ reason).
 ## Decision
 
 - The process table is a section of the host detail page (decision
-  0066). It reads the process list from the sample the fleet poll
+  0077). It reads the process list from the sample the fleet poll
   already fetches every 2 seconds, so it adds no request of its own.
   The agent's history drops process lists, so the table only shows
   the newest one.

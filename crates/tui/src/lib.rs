@@ -1409,6 +1409,7 @@ pub fn run(
     config: Config,
     flags: RunFlags,
 ) -> io::Result<()> {
+    restore_on_panic();
     enable_raw_mode()?;
     let result = run_inner(collector, pids, config, flags);
     restore()?;
@@ -1446,6 +1447,21 @@ fn run_inner(
     let result = event_loop(&mut terminal, collector, pids, config, flags);
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     result
+}
+
+/// Put the terminal back before a panic message prints. Without this a
+/// panic anywhere under [`run`] (audit M1 found one in the protocol
+/// client) left the shell in raw mode on the alternate screen. The hook
+/// wraps whatever hook was installed, once per process.
+fn restore_on_panic() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = restore();
+            previous(info);
+        }));
+    });
 }
 
 fn restore() -> io::Result<()> {
@@ -4261,7 +4277,11 @@ mod tests {
     fn renders_the_header_and_table_at_80x24() {
         let ui = ui_with(Some(sample()), None);
         let rows = render(&ui, 80, 24);
-        assert!(rows[0].contains("zTop 0.1.0"), "{:?}", rows[0]);
+        assert!(
+            rows[0].contains(concat!("zTop ", env!("CARGO_PKG_VERSION"))),
+            "{:?}",
+            rows[0]
+        );
         assert!(rows[0].contains("host-a"), "{:?}", rows[0]);
         assert!(rows[0].contains("up 02:00:54"), "{:?}", rows[0]);
         assert!(rows[0].contains("12 procs"), "{:?}", rows[0]);

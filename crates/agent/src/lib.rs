@@ -45,6 +45,15 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 /// downsampled long tier arrives with the hub's persistence work.
 const FULL_RESOLUTION: usize = 3600;
 
+/// The longest history window one request may ask for, and the window
+/// a request without `seconds` gets: an hour, the whole ring at the
+/// default interval and the most the app reads. The hub uses the same
+/// bound.
+pub const MAX_HISTORY_SECONDS: u64 = 3600;
+
+/// How many history answers may be built at once.
+const HISTORY_READERS: usize = 2;
+
 /// The shared state behind every handler: the sample ring, the
 /// fan-out channel the live stream reads, and the auth.
 pub struct AgentState {
@@ -69,6 +78,10 @@ pub struct AgentState {
     /// host where every sample fails answers 503 forever, and this is
     /// the reason, logged once per change instead of never.
     sample_error: Mutex<Option<String>>,
+    /// History answers being built right now. Each one clones and
+    /// serializes up to an hour of samples, so only a few run at once;
+    /// the rest are told to retry (decision 0069).
+    history_readers: tokio::sync::Semaphore,
 }
 
 impl Default for AgentState {
@@ -85,6 +98,7 @@ impl Default for AgentState {
             enforce_auth: false,
             allow_control: false,
             sample_error: Mutex::new(None),
+            history_readers: tokio::sync::Semaphore::new(HISTORY_READERS),
         }
     }
 }
@@ -211,8 +225,22 @@ pub fn bind_rules(bind: std::net::IpAddr, tls: bool) -> Result<(), String> {
 /// Advertise `_ztop._tcp` for this agent. The record carries the
 /// protocol version, so a browser can skip incompatible services;
 /// registration failures downgrade to a note, never to a crash — a
-/// machine without multicast routes still serves its agents.
-fn advertise(bind: std::net::IpAddr, port: u16) -> mdns_sd::ServiceDaemon {
+/// machine without multicast routes still serves its agents. `None`
+/// means nothing is advertised.
+fn advertise(bind: std::net::IpAddr, port: u16) -> Option<mdns_sd::ServiceDaemon> {
+    advertise_with(bind, port, mdns_sd::ServiceDaemon::new)
+}
+
+/// [`advertise`] with the daemon's constructor passed in, so a test can
+/// make it fail. Before this (audit M5) a failed first start was
+/// retried with `.expect("fresh daemon")`, which usually failed the
+/// same way and crashed the agent; under launchd's `KeepAlive` that was
+/// a restart loop.
+fn advertise_with(
+    bind: std::net::IpAddr,
+    port: u16,
+    new_daemon: impl FnOnce() -> Result<mdns_sd::ServiceDaemon, mdns_sd::Error>,
+) -> Option<mdns_sd::ServiceDaemon> {
     let name = ztop_core::host::hostname();
     let instance = format!("ztop on {name}");
     let mdns_name = if name.contains('.') {
@@ -224,34 +252,33 @@ fn advertise(bind: std::net::IpAddr, port: u16) -> mdns_sd::ServiceDaemon {
         "protocol".to_string(),
         ztop_core::client::PROTOCOL_VERSION.to_string(),
     )]);
-    let info = mdns_sd::ServiceInfo::new(
+    let info = match mdns_sd::ServiceInfo::new(
         "_ztop._tcp.local.",
         &instance,
         &mdns_name,
         bind,
         port,
         properties,
-    )
-    .map(|info| info.enable_addr_auto());
-    match info {
-        Ok(info) => match mdns_sd::ServiceDaemon::new() {
-            Ok(daemon) => {
-                if let Err(error) = daemon.register(info) {
-                    eprintln!("ztop-agent: not advertising: {error}");
-                }
-                daemon
-            }
-            Err(error) => {
-                eprintln!("ztop-agent: not advertising: {error}");
-                // A daemon that never registers is dropped harmlessly.
-                mdns_sd::ServiceDaemon::new().expect("fresh daemon")
-            }
-        },
+    ) {
+        Ok(info) => info.enable_addr_auto(),
         Err(error) => {
             eprintln!("ztop-agent: not advertising: {error}");
-            mdns_sd::ServiceDaemon::new().expect("fresh daemon")
+            return None;
         }
+    };
+    let daemon = match new_daemon() {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            eprintln!("ztop-agent: not advertising: {error}");
+            return None;
+        }
+    };
+    if let Err(error) = daemon.register(info) {
+        eprintln!("ztop-agent: not advertising: {error}");
+        let _ = daemon.shutdown();
+        return None;
     }
+    Some(daemon)
 }
 
 /// Serve the agent protocol on `bind:port` until the process is
@@ -273,7 +300,7 @@ pub async fn serve(
 ) -> std::io::Result<()> {
     bind_rules(bind, tls).map_err(std::io::Error::other)?;
     let mut auth = match ztop_core::paths::state_dir() {
-        Some(dir) => auth::Auth::at(dir.join("tokens.json")).unwrap_or_default(),
+        Some(dir) => auth::Auth::at(dir.join("tokens.json")).map_err(std::io::Error::other)?,
         None => auth::Auth::in_memory(),
     };
     if pair {
@@ -308,13 +335,14 @@ pub async fn serve(
         enforce_auth: tls,
         allow_control,
         sample_error: Mutex::new(None),
+        history_readers: tokio::sync::Semaphore::new(HISTORY_READERS),
     });
     spawn_sampler(state.clone(), DEFAULT_INTERVAL);
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     // The advertisement lasts as long as the daemon handle: dropping it
     // unregisters, so keep it in scope for the whole serve.
     let _mdns = if tls && should_advertise {
-        Some(advertise(bind, port))
+        advertise(bind, port)
     } else {
         None
     };
@@ -681,17 +709,46 @@ struct ProcessesBody {
 }
 
 /// `GET /v1/history?seconds=N`: samples from the last `N` seconds,
-/// oldest first; no parameter means the whole ring.
+/// oldest first, at most [`MAX_HISTORY_SECONDS`]; no parameter means
+/// that maximum. The answer echoes the window it used. While
+/// [`HISTORY_READERS`] answers are being built, another request gets
+/// 429 instead of queueing more copies of the ring (audit M2).
 async fn history(State(state): State<Arc<AgentState>>, query: Query<HistoryQuery>) -> Response {
-    let seconds = query.seconds.unwrap_or(u64::MAX);
-    Json(Envelope {
-        protocol: PROTOCOL_VERSION,
-        body: HistoryBody {
-            seconds,
-            samples: state.since(seconds),
-        },
+    let seconds = query
+        .seconds
+        .unwrap_or(MAX_HISTORY_SECONDS)
+        .min(MAX_HISTORY_SECONDS);
+    let Ok(_slot) = state.history_readers.try_acquire() else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, "1")],
+            "busy: other history answers are being built, retry in a second",
+        )
+            .into_response();
+    };
+    let reader = state.clone();
+    let built = tokio::task::spawn_blocking(move || {
+        serde_json::to_vec(&Envelope {
+            protocol: PROTOCOL_VERSION,
+            body: HistoryBody {
+                seconds,
+                samples: reader.since(seconds),
+            },
+        })
     })
-    .into_response()
+    .await;
+    match built {
+        Ok(Ok(bytes)) => (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            bytes,
+        )
+            .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "history answer failed to build",
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -843,6 +900,15 @@ mod tests {
         assert!(message.contains("--tls"), "{message}");
     }
 
+    /// Regression (audit M5): a daemon that fails to start meant a
+    /// panic in the agent; now it means no advertisement.
+    #[test]
+    fn a_failed_mdns_start_skips_advertising_instead_of_crashing() {
+        let bind: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let daemon = super::advertise_with(bind, 0, || Err(mdns_sd::Error::Again));
+        assert!(daemon.is_none());
+    }
+
     /// A live register-and-browse round trip; ignored because it needs
     /// working multicast, which CI containers do not promise. Run it
     /// where Bonjour works: `cargo test -p ztop-agent -- --ignored`.
@@ -850,7 +916,7 @@ mod tests {
     #[ignore = "needs working multicast: run on a real desktop host"]
     async fn the_agent_is_discoverable_over_bonjour() {
         let bind: std::net::IpAddr = "127.0.0.1".parse().unwrap();
-        let daemon = super::advertise(bind, 0);
+        let daemon = super::advertise(bind, 0).expect("a daemon");
         let browser = daemon.browse("_ztop._tcp.local.").expect("browser");
         let found = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while let Ok(event) = browser.recv_async().await {
@@ -1278,6 +1344,38 @@ mod tests {
             .expect("body");
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(value["samples"].as_array().map(Vec::len), Some(2));
+        assert_eq!(value["seconds"], MAX_HISTORY_SECONDS);
+    }
+
+    /// Regression (audit M2): `/v1/history` had no range limit, and any
+    /// number of requests could clone and serialize the ring at once.
+    #[tokio::test]
+    async fn history_windows_are_capped_and_concurrent_answers_bounded() {
+        let state = Arc::new(AgentState::default());
+        state.push(a_sample());
+        let answer = history(
+            State(state.clone()),
+            Query(HistoryQuery {
+                seconds: Some(u64::MAX),
+            }),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(value["seconds"], MAX_HISTORY_SECONDS);
+
+        // With every reader slot taken, the next request is told to
+        // retry rather than building another copy.
+        let held: Vec<_> = (0..HISTORY_READERS)
+            .map(|_| state.history_readers.try_acquire().expect("a free slot"))
+            .collect();
+        let busy = history(State(state.clone()), Query(HistoryQuery { seconds: None })).await;
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        drop(held);
+        let freed = history(State(state), Query(HistoryQuery { seconds: None })).await;
+        assert_eq!(freed.status(), StatusCode::OK);
     }
 
     #[test]

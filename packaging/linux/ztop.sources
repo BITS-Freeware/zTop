@@ -1,0 +1,7 @@
+# zTop's apt repository, so `apt upgrade` keeps ztop up to date. Installed by the ztop
+# package; set "Enabled: no" to stop updates from it.
+Types: deb
+URIs: https://downloads.bristleconeit.com/ztop/apt
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/ztop-archive-keyring.gpg
