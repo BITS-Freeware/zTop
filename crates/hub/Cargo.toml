@@ -8,8 +8,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ztop-core = { path = "../core", version = "0.1.1" }
-ztop-agent = { path = "../agent", version = "0.1.1" }
+ztop-core = { path = "../core", version = "0.1.2" }
+ztop-agent = { path = "../agent", version = "0.1.2" }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

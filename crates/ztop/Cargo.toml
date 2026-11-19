@@ -10,7 +10,7 @@ rust-version.workspace = true
 [dependencies]
 clap = { workspace = true }
 tokio = { workspace = true }
-ztop-agent = { path = "../agent", version = "0.1.1" }
-ztop-core = { path = "../core", version = "0.1.1" }
-ztop-hub = { path = "../hub", version = "0.1.1" }
-ztop-tui = { path = "../tui", version = "0.1.1" }
+ztop-agent = { path = "../agent", version = "0.1.2" }
+ztop-core = { path = "../core", version = "0.1.2" }
+ztop-hub = { path = "../hub", version = "0.1.2" }
+ztop-tui = { path = "../tui", version = "0.1.2" }
