@@ -87,6 +87,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  arch:
+    # The Arch package (packaging/arch, decision 0076) built from this checkout with its tests,
+    # linted with namcap, installed with pacman, paired with and removed. Docker Hub's archlinux
+    # image is x86_64 only, so aarch64 is built by people on Arch Linux ARM, not here.
+    name: Arch package (x86_64)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 45
+    steps:
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed base-devel git rust namcap
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Build, lint, install, pair with and remove ztop-monitor
+        run: packaging/arch/check-arch.sh ztop-monitor
+
   homebrew:
     name: Homebrew (macOS)
     runs-on: macos-latest
