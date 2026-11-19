@@ -11,6 +11,8 @@ Updated after every working session.
 
 Newest first. One or two lines per session: what changed, what is next.
 
+- 2026-11-19 (Arch): An Arch package, `ztop-monitor` (the AUR's `ztop` is another program), built from a release tag or a checkout with `packaging/arch/makepkg-local.sh`; CI builds, lints, installs, pairs with and removes it in an `archlinux` container (decision 0076). It ships the user agent and, like the `.deb`, the system agent for servers. Next: test on two Omarchy machines, then the desktop app's `ztop-desktop` package and the first AUR upload.
+
 - 2026-11-19 (audit, medium): Fixed M1 to M6, M8 and M9, regression test first for each. The client parses bytes, caps responses at 32 MiB and gives a fetch one deadline, and the TUI restores the terminal on panic (0068; new fuzz target `parse_response`). Agent history is capped at an hour with two answers in flight (0069). Tokens are saved through a temporary file; a corrupt file is moved aside loudly (0070). Hub rows carry the hub's receive time (0071). Directories 0700, key and database 0600 at creation (0072). sqlx 0.9 clears RUSTSEC-2026-0459 and CI checks advisories (0073). M7 is left to the apt repository work. mDNS failures skip advertising; Linux reads only the sensor files it parses. Next: the full-hour budget run.
 
 - 2026-11-19 (servers): The `.deb` gains a system agent for servers: `ztop-agent.service` as the `ztop` user, state in `/var/lib/ztop`, address from `/etc/default/ztop-agent`, ordered after `tailscaled`, never pairing; `/usr/lib/ztop/pair-system-agent` pairs a read-only client over loopback (decision 0066). `packaging/check-deb.sh` tests the user, the pairing and the token's rights. Released as 0.1.2.

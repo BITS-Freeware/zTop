@@ -9,7 +9,7 @@ On Debian, Ubuntu or Raspberry Pi OS (64-bit), install `ztop` with:
 
     curl -fsSL https://downloads.bristleconeit.com/ztop/install.sh | sh
 
-It adds zTop's signed apt repository, so `sudo apt upgrade` keeps it current. On a Mac, use the Homebrew formula in [packaging](packaging/README.md).
+It adds zTop's signed apt repository, so `sudo apt upgrade` keeps it current. On Arch Linux and Omarchy, build the `ztop-monitor` package with makepkg ([packaging/arch](packaging/arch/README.md)). On a Mac, use the Homebrew formula in [packaging](packaging/README.md).
 
 Status: 0.1.0, an early release. See [ROADMAP.md](ROADMAP.md) for the plan, [DESIGN.md](DESIGN.md) for how it works, and [STATUS.md](STATUS.md) for where work stands.
 

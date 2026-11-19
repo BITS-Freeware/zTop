@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Maintainer: Bristlecone IT Services
+#
+# ztop for Arch Linux and Arch-based systems such as Omarchy (decision 0076). The AUR name
+# "ztop" belongs to an unrelated ZFS I/O viewer that also installs /usr/bin/ztop, so this
+# package is ztop-monitor and conflicts with it. Build it from a checkout of this repository
+# with packaging/arch/makepkg-local.sh, or from a release tag with makepkg.
+pkgname=ztop-monitor
+pkgver=0.1.2
+pkgrel=1
+pkgdesc='Resource monitor for Macs and Linux machines, alone or as a fleet (terminal monitor, agent and hub)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/BITS-Freeware/zTop'
+license=('MIT OR Apache-2.0')
+depends=('glibc' 'libgcc' 'bash' 'util-linux')
+makedepends=('cargo')
+optdepends=('nvidia-utils: NVIDIA GPU metrics')
+provides=('ztop')
+conflicts=('ztop')
+backup=('etc/default/ztop-agent')
+install=ztop-monitor.install
+options=('!lto')
+source=("zTop-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# A release tarball's sum is filled in by packaging/arch/prepare-aur.sh (updpkgsums).
+sha256sums=('SKIP')
+
+prepare() {
+  cd "zTop-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "zTop-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p ztop
+}
+
+check() {
+  cd "zTop-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "zTop-$pkgver"
+  install -Dm755 target/release/ztop "$pkgdir/usr/bin/ztop"
+  # The shipped unit names /usr/local/bin for people who install the binary by hand.
+  sed 's|/usr/local/bin/ztop|/usr/bin/ztop|g' packaging/systemd/ztop-agent.service \
+    | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/ztop-agent.service"
+  # The system agent for servers (decision 0066): its unit, its user (pacman's sysusers hook
+  # creates it), its options file and the pairing helper, as in the .deb.
+  install -Dm644 packaging/systemd/system/ztop-agent.service "$pkgdir/usr/lib/systemd/system/ztop-agent.service"
+  install -Dm644 packaging/systemd/system/ztop.sysusers "$pkgdir/usr/lib/sysusers.d/ztop.conf"
+  install -Dm644 packaging/systemd/system/ztop-agent.default "$pkgdir/etc/default/ztop-agent"
+  install -Dm755 packaging/linux/pair-system-agent "$pkgdir/usr/lib/ztop/pair-system-agent"
+  install -Dm644 packaging/linux/README.server "$pkgdir/usr/share/doc/ztop/README.server"
+  install -Dm644 packaging/man/ztop.1 "$pkgdir/usr/share/man/man1/ztop.1"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/ztop/README.md"
+  install -Dm644 packaging/README.md "$pkgdir/usr/share/doc/ztop/services.md"
+  install -Dm644 packaging/arch/README.md "$pkgdir/usr/share/doc/ztop/arch.md"
+}
