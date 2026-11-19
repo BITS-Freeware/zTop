@@ -11,7 +11,7 @@ Updated after every working session.
 
 Newest first. One or two lines per session: what changed, what is next.
 
-- 2026-11-19 (servers): The `.deb` gains a system agent for servers: `ztop-agent.service` as the `ztop` user, state in `/var/lib/ztop`, address from `/etc/default/ztop-agent`, ordered after `tailscaled`, never pairing; `/usr/lib/ztop/pair-system-agent` pairs a read-only client over loopback (decision 0066). `packaging/check-deb.sh` tests the user, the pairing and the token's rights. Next: release it in 0.1.2.
+- 2026-11-19 (servers): The `.deb` gains a system agent for servers: `ztop-agent.service` as the `ztop` user, state in `/var/lib/ztop`, address from `/etc/default/ztop-agent`, ordered after `tailscaled`, never pairing; `/usr/lib/ztop/pair-system-agent` pairs a read-only client over loopback (decision 0066). `packaging/check-deb.sh` tests the user, the pairing and the token's rights. Released as 0.1.2.
 
 - 2026-11-19 (apt): The `.deb` now installs into `/usr`, builds natively on Debian 12 for amd64 and arm64, adds zTop's signed apt repository, and installs with a one-line installer; Publish Linux Packages publishes a Packaging run to downloads.bristleconeit.com/ztop (decision 0065). `packaging/check-deb.sh` tests the installer and a signed upgrade in CI. Next: the `apt-publish` environment's secrets, a dry run, then the first apt release.
 
