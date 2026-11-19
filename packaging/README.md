@@ -1,25 +1,14 @@
 # zTop services
 
-Every service file runs the agent as a **read-only** long-lived service:
+Both service files run the agent as a **read-only** long-lived service:
 TLS with pairing, no `--allow-control`, so nothing paired through them
 can signal or renice. To allow control, add `--allow-control` to
 `ProgramArguments` (launchd) or `ExecStart` (systemd) and restart the
 service; tokens paired before the change keep their read-only rights —
 pair again afterwards to hold the `control` right (decision 0042).
 
-The per-user files point at `/usr/local/bin/ztop`, where a binary you
-installed by hand usually lives; change it to wherever yours is.
-
-## Debian and Ubuntu (the .deb, system-wide)
-
-The package installs `/usr/bin/ztop` and
-`systemd/ztop-agent-system.service` as the system unit
-`ztop-agent.service`. It creates the unprivileged `ztop` system user,
-runs the agent as that user with its state in `/var/lib/ztop` (mode
-0700) and a sandboxed unit, and enables and starts it. Read the pairing
-code and fingerprint with `sudo journalctl -u ztop-agent`; restart the
-service for a fresh code. Purging the package deletes `/var/lib/ztop`,
-and the `ztop` user only if the package created it.
+Both point at `/usr/local/bin/ztop`; change it to wherever your
+package manager installed the binary.
 
 ## macOS (launchd, per user)
 

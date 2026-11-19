@@ -39,7 +39,7 @@ will be credited in the changelog if you want to be.
 ## Notes for operators
 
 - On Linux, run the agent as its own unprivileged user (the `.deb` package
-  creates `ztop` and runs its system service as that user).
+  creates one).
 - Treat the hub host as trusted with everything its agents can see.
 - The hub's SQLite history contains process names; handle the file with
   normal file-permission hygiene.

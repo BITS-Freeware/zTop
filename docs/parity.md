@@ -382,10 +382,8 @@ The zTop app for iPad and Mac is developed separately and tracks its own items. 
   (`packaging/homebrew/ztop.rb`: builds the tagged source, `service do`
   block runs a read-only agent — TLS + pairing, no `--allow-control`).
 - [x] `.deb` for amd64 and arm64 with a systemd unit and a dedicated user
-  (`packaging/build-deb.sh` installs `/usr/bin/ztop` and the system unit
-  `lib/systemd/system/ztop-agent.service`, which runs the agent as the
-  `ztop` system user that postinst creates, with state in `/var/lib/ztop`;
-  decision 0073. CI checks the user, the unit and a purge).
+  (`packaging/build-deb.sh` packages `lib/systemd/user/ztop-agent.service`;
+  postinst creates the `ztop` system user, best-effort).
 - [x] Install, upgrade and uninstall tested in CI on both
   (`.github/workflows/packaging.yml`: the `.deb` matrix amd64/arm64 and the
   Homebrew job each install, upgrade, pair a test client with the installed

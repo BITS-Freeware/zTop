@@ -22,7 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hub retention deletes rows past a day, history no longer stores process lists, and windows, pruning and the latest sample go by the hub's own clock.
 - The live Linux collector reads command lines, finds mounted disks, survives offline CPUs and reads only the sensor and battery files it uses.
 - A failed mDNS start no longer crashes the agent.
-- The .deb installs under `/usr`, runs the agent as a sandboxed system service for the `ztop` user, and removes only what it created.
 
 ## [0.1.0] - 2026-11-18
 

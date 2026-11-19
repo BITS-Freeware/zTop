@@ -1,4 +1,4 @@
-# 0074 — Advisories run in CI, and the hub moves to sqlx 0.9
+# 0073 — Advisories run in CI, and the hub moves to sqlx 0.9
 
 ## Context
 

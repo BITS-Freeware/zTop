@@ -54,6 +54,6 @@ One `Collector` trait in the core crate, with one implementation per platform, e
 ## Packaging
 
 - **Homebrew:** a formula that builds or installs `ztop` and defines a `brew services` launchd service for the agent.
-- **apt:** `.deb` packages for amd64 and arm64 (`packaging/build-deb.sh`) with a systemd system unit that runs the agent as a dedicated unprivileged `ztop` user (decision 0073).
+- **apt:** `.deb` packages for amd64 and arm64 (`cargo-deb` is the expected tool) with a systemd unit that runs the agent as a dedicated unprivileged `ztop` user.
 - Publishing to a tap and an apt repository, and signing, are release steps for the maintainer; the repository holds everything needed to build and check the packages.
 - A man page for `ztop`, and `ztop --help` that matches it.
