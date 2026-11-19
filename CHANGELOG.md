@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **zTop for Linux** (`desktop/`): a GTK4 and libadwaita desktop app. Add an agent or hub by address, TLS fingerprint and pairing code; every host gets a card with its live, stale, unreachable or needs-pairing state, CPU, memory and uptime. Tokens go to the desktop keyring (decision 0065).
+- **zTop for Linux, host detail:** click a card for 15 minutes of charts (CPU, memory and swap, load, disk and network rates, temperatures, fans), a bar per core and a row per mounted disk (decision 0077).
+- `RemoteCollector::history` in `ztop-core` reads an agent's or hub's `/v1/history`.
+- **zTop for Linux, hubs, discovery and alerts:** add a hub and every machine it watches gets a card read through it; the add-host dialog lists agents found over Bonjour; alert rules (CPU, memory, load, disk, unreachable) notify on the desktop (decision 0075). `ztop-core` gains `RemoteCollector::through_hub` and `hub_hosts`.
+- **zTop for Linux, processes:** the detail page lists the host's processes with search and sort, and sends signals from the target's own catalog, KILL behind a confirmation (decision 0067). `RemoteCollector::signal_catalog` in `ztop-core` reads `GET /v1/control`.
+
 ### Security
 
 - The protocol client parses responses as bytes (a crafted response could panic it), reads at most 32 MiB, and gives each fetch one overall deadline.
@@ -30,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **apt**: a one-line installer for Debian, Ubuntu and Raspberry Pi OS (`curl -fsSL https://downloads.bristleconeit.com/ztop/install.sh | sh`) and a signed apt repository, so `sudo apt upgrade` keeps ztop current (decision 0065).
+- **apt**: a one-line installer for Debian, Ubuntu and Raspberry Pi OS (`curl -fsSL https://downloads.bristleconeit.com/ztop/install.sh | sh`) and a signed apt repository, so `sudo apt upgrade` keeps ztop current (decision 0074).
 
 ### Security
 

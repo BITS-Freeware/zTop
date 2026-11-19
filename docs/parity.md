@@ -376,6 +376,18 @@ Check an item only when it works and a test or a recorded check shows it. Add th
 
 The zTop app for iPad and Mac is developed separately and tracks its own items. This repository covers everything the app talks to: the agent, the hub and the protocol above.
 
+## zTop for Linux
+
+The desktop app in `desktop/` (decision 0065), milestone by milestone (ROADMAP.md, L1 to L5).
+
+- [x] Add a host by hand, and pair — the add-host dialog (address, port, optional SHA256 fingerprint and pairing code) pairs through `ztop-core`'s `pair_with` before saving, and a card whose token is refused offers Pair. Tested live (`pairing_turns_a_refused_read_into_a_live_one`: a real 401 reads as "needs pairing", the printed code pairs, a used or wrong code does not). Recorded: `docs/screenshots/desktop-add-host.png`.
+- [x] Fleet overview with live cards; stale and unreachable hosts obvious — `desktop/scripts/recorded-run.sh` pairs two TLS agents (`host-a`, `host-b`, loopback) with tokens in a throwaway gnome-keyring and checks the app's own report: both live (`desktop-overview.png`), then host-b stale after its agent stops (`desktop-stale.png`) and unreachable past 10 s (`desktop-unreachable.png`). Freshness rules unit-tested and tested live (`a_wrong_pin_fails_and_a_stopped_agent_goes_stale`).
+- [x] Tokens kept in the desktop keyring — the libsecret store is tested against a real gnome-keyring in CI (`tokens_round_trip_through_the_keyring`); the 0600-file fallback is tested and announced by a banner.
+- [ ] Host detail with charts for every metric (L2) — clicking a card opens the detail page (decision 0077): the agent's own `/v1/history` (15 minutes) followed by the fleet poll, charts for CPU, memory and swap, load, disk and network rates, temperatures and fans, a bar per core and a row per mounted disk. The recorded run (`DETAIL=host-a desktop/scripts/recorded-run.sh`, a check.sh stage) shows CPU, memory, load, disks, network and the per-core bars against a live agent: `docs/screenshots/desktop-detail.png`, `desktop-detail-network.png`. The series are unit-tested in `history.rs` (temperatures and fans included) and the history read in `the_detail_page_history_comes_from_the_agent_in_time_order`. Unticked until a recorded run on a machine with temperature sensors and fans shows those two sections.
+- [x] Process list: search, sort and, where allowed, signals (L3) — the detail page's Processes section (decision 0067): a search over name, user and pid prefix, a sort menu over CPU, memory, pid, name and user with a pid tie-break both ways (`processes.rs`, 6 tests), the busiest 30 rows from the fleet poll, and a menu per row with the target agent's own signal catalog (`GET /v1/control`, so STOP is the target's number), TERM first and KILL behind a confirmation. End to end over real TLS in `stop_cont_and_term_reach_a_process_by_the_agents_numbers`: a refusal in the agent's words without `--allow-control`, then STOP, CONT and TERM delivered to a process the test owns, checked in `/proc`. Recorded: `docs/screenshots/desktop-processes.png`.
+- [x] Add a host found by Bonjour; alerts with desktop notifications; the fleet through a hub (L4) — decision 0075. Hub: a hub record lists the machines it watches and each gets a card read through the hub with its token; recorded in `docs/screenshots/desktop-hub.png` by the `recorded-hub` stage (three agents and the hub all live) and tested in `three_agents_read_back_live_through_one_hub` (snapshots and history through the hub, 401 without the token). Bonjour: the add-host dialog lists advertising agents and fills the address and port (`desktop-add-host-nearby.png`); the found agent is paired in `an_advertised_agent_is_found_with_its_port_on_loopback` (needs `ZTOP_TEST_MULTICAST=1`). Alerts: rules for CPU, memory, load, disk and unreachable with the Mac app's semantics (`alerts.rs`, 6 tests with fixed clocks), a `GNotification` and a toast per event; the `recorded-alerts` stage stops an agent and checks that an unreachable rule fired (`desktop-alerts.png`). The notification popup itself is not recorded: the test session has no notification server.
+- [ ] .deb and Flatpak packages (L5)
+
 ## Packaging
 
 - [x] Homebrew formula with a `brew services` agent
@@ -385,11 +397,11 @@ The zTop app for iPad and Mac is developed separately and tracks its own items. 
   (`packaging/build-deb.sh` packages `/usr/bin/ztop` and
   `/usr/lib/systemd/user/ztop-agent.service`, built natively on Debian 12
   for each architecture; the package adds zTop's signed apt repository,
-  decision 0065. The `ztop` system user of 0.1.0 is gone: the agent is a
+  decision 0074. The `ztop` system user of 0.1.0 is gone: the agent is a
   per-person user service).
 - [x] Install, upgrade and uninstall tested in CI on both
   (`.github/workflows/packaging.yml`: the `.deb` matrix amd64/arm64 and the
   Homebrew job each install, upgrade, pair a test client with the installed
-  agent, and uninstall; green on 0e54b69. Since decision 0065 the `.deb`
+  agent, and uninstall; green on 0e54b69. Since decision 0074 the `.deb`
   jobs install with the one-line installer and upgrade through a signed
   apt repository, `packaging/check-deb.sh`).

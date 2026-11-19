@@ -8,3 +8,6 @@
 /*.deb
 
 .DS_Store
+
+# The desktop app's own workspace
+/desktop/target

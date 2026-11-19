@@ -3,7 +3,8 @@
 Resource monitoring for a mixed fleet of Macs and Linux machines.
 
 - **`ztop`**, a terminal utility for macOS (Homebrew) and Linux (apt). Run it on its own and it is a full interactive monitor, at least the equal of `htop` for processes and of `asitop` for Apple Silicon power, frequency and GPU data. Run `ztop agent` and it serves those metrics over pinned TLS; run `ztop hub` and one machine collects from every agent.
-- **zTop**, an app for iPad and Mac that watches every machine at once through the agent and hub in this repository. The app is developed separately.
+- **zTop for Linux** (`desktop/`), a GTK4 desktop app that watches every machine at once through the agent and hub. See [desktop/README.md](desktop/README.md).
+- **zTop**, an app for iPad and Mac that does the same. The app is developed separately.
 
 On Debian, Ubuntu or Raspberry Pi OS (64-bit), install `ztop` with:
 
