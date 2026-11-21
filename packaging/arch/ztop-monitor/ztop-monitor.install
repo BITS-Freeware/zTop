@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+post_install() {
+  # Both agents stay off until someone turns one on: the user service serves that person's
+  # view of this machine, the system service serves it to a network.
+  echo "ztop is installed. Run ztop for the monitor."
+  echo "To serve this machine to the zTop app or a hub:"
+  echo "  on a desktop: systemctl --user enable --now ztop-agent"
+  echo "  on a server:  see /usr/share/doc/ztop/README.server"
+}
+
+pre_remove() {
+  # Removing the package stops the system agent and turns it off; an upgrade leaves it running.
+  systemctl disable --now ztop-agent.service >/dev/null 2>&1 || true
+}
+
+post_remove() {
+  # Like other Arch packages, the system agent's state (/var/lib/ztop) and the ztop user stay.
+  echo "The system agent's certificate and tokens stay in /var/lib/ztop; delete it to forget them."
+}

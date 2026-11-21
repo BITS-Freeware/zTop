@@ -11,6 +11,8 @@ Updated after every working session.
 
 Newest first. One or two lines per session: what changed, what is next.
 
+- 2026-11-19 (Arch): An Arch package, `ztop-monitor` (the AUR's `ztop` is another program), built from a release tag or a checkout with `packaging/arch/makepkg-local.sh`; CI builds, lints, installs, pairs with and removes it in an `archlinux` container (decision 0076). It ships the user agent and, like the `.deb`, the system agent for servers. Next: test on two Omarchy machines, then the desktop app's `ztop-desktop` package and the first AUR upload.
+
 - 2026-11-19: zTop for Linux L4 (decision 0075): hub records with a card per watched machine read through the hub (`RemoteCollector::through_hub`, `hub_hosts`), Bonjour in the add-host dialog (`mdns-sd` 0.21.7), alert rules with `GNotification`s and the Mac app's semantics. New check.sh stages `recorded-hub` (three agents live through one hub) and `recorded-alerts`; the Bonjour test runs with `ZTOP_TEST_MULTICAST=1`. Next: L5, packaging.
 
 - 2026-11-19: zTop for Linux L3 (decision 0067): a Processes section on the detail page (search, sort with a pid tie-break, 30 busiest rows from the poll, a signal menu per row from the target's catalog via new `RemoteCollector::signal_catalog`, KILL behind an `AdwAlertDialog`). End-to-end test sends STOP, CONT and TERM to a `sleep` it owns and checks `/proc`. Recorded `desktop-processes.png` (`ZTOP_DESKTOP_SEARCH`, `ZTOP_DESKTOP_SCROLL` hooks). Next: L4.

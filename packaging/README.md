@@ -50,6 +50,12 @@ it, so no client paired through them can list or revoke tokens. To
 manage tokens, stop the service and run `ztop agent --tls --pair
 --allow-manage` once by hand to pair your own client.
 
+## Arch Linux and Omarchy
+
+Build and install the `ztop-monitor` package with makepkg; see
+[arch/README.md](arch/README.md), which also covers serving the network
+and Omarchy's firewall.
+
 ## Debian and Ubuntu (apt)
 
     curl -fsSL https://downloads.bristleconeit.com/ztop/install.sh | sh
