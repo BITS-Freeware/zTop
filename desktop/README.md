@@ -14,6 +14,14 @@ sudo apt install libgtk-4-dev libadwaita-1-dev libsecret-1-dev
 cargo run --manifest-path desktop/Cargo.toml
 ```
 
+On Arch Linux and Omarchy, `sudo pacman -S --needed rust gtk4 libadwaita
+libsecret` instead, or build and install the `ztop-desktop` package with
+`packaging/arch/makepkg-local.sh ztop-desktop -si` (see
+[packaging/arch](../packaging/arch/README.md)). It runs natively on
+Wayland compositors such as Hyprland. Tokens go to the keyring through
+the Secret Service, so a keyring daemon such as gnome-keyring must be
+running and unlocked; without one they go to files.
+
 Hosts are saved in `~/.config/ztop-desktop/hosts.json` (or
 `$XDG_CONFIG_HOME/ztop-desktop`); pairing tokens go to the desktop
 keyring, or to 0600 files beside `hosts.json` when no keyring runs.

@@ -10,7 +10,7 @@ Two packages for Arch Linux and Arch-based systems such as Omarchy
   installs `/usr/bin/ztop`, so this package has another name and
   conflicts with that one.
 - **ztop-desktop**: zTop for Linux, the GTK4 desktop app in
-  [desktop/](../../desktop), once it is on main.
+  [desktop/](../../desktop).
 
 Both build from source with makepkg and run on x86_64 and aarch64.
 

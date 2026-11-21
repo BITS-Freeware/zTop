@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=zTop
+GenericName=Fleet Monitor
+Comment=Watch your Macs and Linux machines through their zTop agents and hubs
+Exec=ztop-desktop
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;GTK;
+Keywords=monitor;fleet;agent;hub;cpu;memory;processes;
+StartupNotify=true
