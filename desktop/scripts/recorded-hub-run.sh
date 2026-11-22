@@ -35,7 +35,12 @@ mkdir -p "$WORK/hub"
 env -i HOME="$WORK/hub" "$BIN" hub --tls --pair --port "$HUB_PORT" --agents "$WORK/agents.json" >"$WORK/hub.log" 2>&1 &
 echo $! >"$WORK/hub.pid"
 i=0
-while ! grep -q "Pairing code" "$WORK/hub.log" && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+# The hub prints its pairing code before it binds and its fingerprint
+# only after it has made its TLS key, so wait for both lines.
+while ! { grep -q "Pairing code" "$WORK/hub.log" && grep -q "TLS fingerprint" "$WORK/hub.log"; } && [ $i -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
 pin=$(awk '/TLS fingerprint/ {print $3}' "$WORK/hub.log")
 code=$(awk '/Pairing code/ {print $3}' "$WORK/hub.log")
 SEED="hub-1|127.0.0.1|$HUB_PORT|$pin|$code|hub"
