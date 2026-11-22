@@ -266,10 +266,10 @@ pub fn parse_cpuinfo_frequencies(text: &str) -> Vec<Metric> {
                 None => {}
             }
             saw_processor = true;
-        } else if let Some(rest) = line.strip_prefix("cpu MHz") {
-            if let Some(value) = rest.split(':').nth(1).and_then(|v| v.trim().parse().ok()) {
-                current = Some(value);
-            }
+        } else if let Some(rest) = line.strip_prefix("cpu MHz")
+            && let Some(value) = rest.split(':').nth(1).and_then(|v| v.trim().parse().ok())
+        {
+            current = Some(value);
         }
     }
     match current.take() {
@@ -779,13 +779,13 @@ pub(crate) fn detect_container(text: &str) -> Option<Container> {
                 runtime: "docker".into(),
             });
         }
-        if *segment == "docker" {
-            if let Some(id) = id_of(next) {
-                return Some(Container {
-                    id,
-                    runtime: "docker".into(),
-                });
-            }
+        if *segment == "docker"
+            && let Some(id) = id_of(next)
+        {
+            return Some(Container {
+                id,
+                runtime: "docker".into(),
+            });
         }
         // Podman keeps its own scope shape and podman-prefixed dirs.
         let podman_scope = segment
@@ -798,13 +798,13 @@ pub(crate) fn detect_container(text: &str) -> Option<Container> {
                 runtime: "podman".into(),
             });
         }
-        if *segment == "podman" || *segment == "libpod" {
-            if let Some(id) = id_of(next) {
-                return Some(Container {
-                    id,
-                    runtime: "podman".into(),
-                });
-            }
+        if (*segment == "podman" || *segment == "libpod")
+            && let Some(id) = id_of(next)
+        {
+            return Some(Container {
+                id,
+                runtime: "podman".into(),
+            });
         }
         // The container runtimes behind Kubernetes name their scopes
         // after themselves.

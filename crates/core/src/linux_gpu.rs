@@ -121,9 +121,9 @@ fn read_amd_temperature(device: &Path) -> Metric {
     Metric::available(millidegrees as f64 / 1000.0, Unit::Celsius)
 }
 
-/// Fan speed from the card's `pwm1` (0–255), only when the control is
-/// in manual or automatic reporting mode (`pwm1_enable` present). A
-/// missing pwm on a fanless card stays unavailable, not zero.
+/// Fan speed from the card's `pwm1` (0–255) as a percent. A missing
+/// or out-of-range pwm, as on a fanless card, stays unavailable, not
+/// zero.
 fn read_amd_fan(device: &Path) -> Metric {
     let Some(pwm) = find_hwmon(device, "pwm1")
         .and_then(|path| read_trimmed(&path))

@@ -107,6 +107,13 @@ fn load_nvml() -> Option<Nvml> {
 unsafe fn symbol<T>(lib: *mut c_void, name: &CStr) -> Option<T> {
     unsafe {
         let address = dlsym(lib, name.as_ptr());
+        // Every T here is an `unsafe extern "C" fn` type; one of another
+        // size would make the copy read past the handle.
+        assert_eq!(
+            std::mem::size_of::<T>(),
+            std::mem::size_of::<*mut c_void>(),
+            "dlsym symbols are read as pointer-sized fn types"
+        );
         if address.is_null() {
             None
         } else {

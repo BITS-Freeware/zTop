@@ -1040,10 +1040,10 @@ impl Ui {
         if !self.pid_filter.is_empty() && !self.pid_filter.contains(&process.pid) {
             return false;
         }
-        if let Some(user) = &self.user_filter {
-            if &process.user != user {
-                return false;
-            }
+        if let Some(user) = &self.user_filter
+            && &process.user != user
+        {
+            return false;
         }
         if let Some(pattern) = &self.filter {
             let pattern = pattern.to_lowercase();
@@ -1295,10 +1295,10 @@ impl Ui {
                         self.follow = None;
                         self.cursor = None;
                     }
-                } else if let Some(selected) = self.cursor {
-                    if !exists(selected, &sample) {
-                        self.cursor = None;
-                    }
+                } else if let Some(selected) = self.cursor
+                    && !exists(selected, &sample)
+                {
+                    self.cursor = None;
                 }
                 // Remember this sample's pids as the previous generation,
                 // so the next sample can tell which processes are new.
@@ -1339,10 +1339,11 @@ impl Ui {
         push(&mut self.mem_history, mem_ratio);
         let (swap_ratio, _) = swap_gauge(&sample.memory);
         push(&mut self.swap_history, swap_ratio);
-        if let Some(battery) = &sample.sensors.battery {
-            if battery.percent.available && battery.percent.value >= 0.0 {
-                push(&mut self.battery_history, battery.percent.value / 100.0);
-            }
+        if let Some(battery) = &sample.sensors.battery
+            && battery.percent.available
+            && battery.percent.value >= 0.0
+        {
+            push(&mut self.battery_history, battery.percent.value / 100.0);
         }
         if cpu_percent_mean(sample).is_some() {
             let cores = sample.cpu.busy_percent.len().max(1) as f64;
@@ -1680,13 +1681,11 @@ fn event_loop(
                 if key.kind == KeyEventKind::Press && handle_key_with(&mut ui, collector, key) {
                     return Ok(());
                 }
-            } else if let Event::Mouse(mouse) = event {
-                if let Some(key) = handle_mouse(&mut ui, mouse.kind, mouse.column, mouse.row, area)
-                {
-                    if handle_key_with(&mut ui, collector, key) {
-                        return Ok(());
-                    }
-                }
+            } else if let Event::Mouse(mouse) = event
+                && let Some(key) = handle_mouse(&mut ui, mouse.kind, mouse.column, mouse.row, area)
+                && handle_key_with(&mut ui, collector, key)
+            {
+                return Ok(());
             }
         } else if ui.trace.is_some() {
             // A slice expired: the next draw drains the trace. Sample
@@ -3878,10 +3877,11 @@ fn handle_mouse(
     // click on a label switches screens (clicking the active tab returns
     // to the process table, matching the keys' toggle behavior).
     if ui.screen != Screen::ProcessTable {
-        if kind == MouseEventKind::Down(MouseButton::Left) && row == total.y {
-            if let Some(screen) = tab_at(ui, column) {
-                ui.goto_screen(screen);
-            }
+        if kind == MouseEventKind::Down(MouseButton::Left)
+            && row == total.y
+            && let Some(screen) = tab_at(ui, column)
+        {
+            ui.goto_screen(screen);
         }
         return None;
     }

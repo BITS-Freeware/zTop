@@ -3,7 +3,8 @@
 //!
 //! Sources, all readable without root (decision 0009):
 //! - Mounts and capacity: `getmntinfo(3)`, the same `statfs` view the
-//!   `df` tool shows. Total is `f_blocks * f_frsize`, used is the
+//!   `df` tool shows. Total is `f_blocks * f_bsize` (macOS `statfs`
+//!   has no `f_frsize`; its `f_bsize` is the fundamental block size), used is the
 //!   capacity not available to unprivileged users
 //!   (`f_blocks - f_bavail`), matching the Linux collector's definition.
 //! - Disk IO counters: the IOKit registry's `IOBlockStorageDriver`
@@ -283,10 +284,10 @@ fn io_disk_counters() -> HashMap<String, (u64, u64)> {
                 0,
             );
             if !name.is_null() {
-                if let Some(device) = string_of(name) {
-                    if let Some((read, write)) = ancestor_statistics(media) {
-                        out.insert(device_name(&device).unwrap_or(device), (read, write));
-                    }
+                if let Some(device) = string_of(name)
+                    && let Some((read, write)) = ancestor_statistics(media)
+                {
+                    out.insert(device_name(&device).unwrap_or(device), (read, write));
                 }
                 ffi::CFRelease(name);
             }

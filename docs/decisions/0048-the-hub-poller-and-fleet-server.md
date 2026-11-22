@@ -29,7 +29,7 @@ the agent serves and the collector uses); a failed poll is recorded, not
 retried early.
 
 **The hub is a server with one addition.** The routes are the agent's
-(`/v1/health`, `/v1/pair`, `/v1/snapshot`, `/v1/history`, `/v1/tokens`)
+(`/healthz`, `/v1/pair`, `/v1/snapshot`, `/v1/history`, `/v1/tokens`)
 with the agent's status codes, plus `/v1/hosts`, the fleet listing, and
 one selector: every sample-taking route accepts `?host=NAME` to pick one
 watched agent. A client talks to the hub exactly as to an agent, so

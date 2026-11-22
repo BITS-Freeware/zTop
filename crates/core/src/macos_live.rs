@@ -155,19 +155,19 @@ impl Collector for MacOsCollector {
             .iter()
             .map(|n| (n.name.clone(), (n.rx_bytes, n.tx_bytes)))
             .collect();
-        if let Some(prev) = self.prev.as_ref() {
-            if let Some(secs) = interval_secs {
-                for (name, read, write) in macos_io::byte_rates(&prev.disks, &current_disks, secs) {
-                    if let Some(disk) = disks.iter_mut().find(|d| d.name == name) {
-                        disk.read_rate = read;
-                        disk.write_rate = write;
-                    }
+        if let Some(prev) = self.prev.as_ref()
+            && let Some(secs) = interval_secs
+        {
+            for (name, read, write) in macos_io::byte_rates(&prev.disks, &current_disks, secs) {
+                if let Some(disk) = disks.iter_mut().find(|d| d.name == name) {
+                    disk.read_rate = read;
+                    disk.write_rate = write;
                 }
-                for (name, rx, tx) in macos_io::byte_rates(&prev.net, &current_net, secs) {
-                    if let Some(interface) = net.iter_mut().find(|n| n.name == name) {
-                        interface.rx_rate = rx;
-                        interface.tx_rate = tx;
-                    }
+            }
+            for (name, rx, tx) in macos_io::byte_rates(&prev.net, &current_net, secs) {
+                if let Some(interface) = net.iter_mut().find(|n| n.name == name) {
+                    interface.rx_rate = rx;
+                    interface.tx_rate = tx;
                 }
             }
         }

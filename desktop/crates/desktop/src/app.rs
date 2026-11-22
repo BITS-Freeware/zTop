@@ -384,20 +384,35 @@ impl Fleet {
     }
 
     pub fn remove(self: &Rc<Self>, id: &str) {
-        if let Some(registry) = self.registry.borrow_mut().as_mut() {
-            if let Err(why) = registry.remove(id) {
-                self.toast(&format!("Could not save the change: {why}"));
-                return;
-            }
+        if let Some(registry) = self.registry.borrow_mut().as_mut()
+            && let Err(why) = registry.remove(id)
+        {
+            self.toast(&format!("Could not save the change: {why}"));
+            return;
         }
         if let Some(card) = self.cards.borrow_mut().remove(id) {
             self.flow.remove(&card.root);
         }
+        let mut gone = vec![id.to_string()];
         for machine in self.members.borrow_mut().remove(id).unwrap_or_default() {
             if let Some(card) = self.cards.borrow_mut().remove(&machine.id) {
                 self.flow.remove(&card.root);
             }
             self.live.borrow_mut().remove(&machine.id);
+            gone.push(machine.id);
+        }
+        // Its alerts stop firing and their notifications go with it.
+        let rules = self.alert_rules();
+        let cleared: Vec<_> = gone
+            .iter()
+            .flat_map(|host| self.engine.borrow_mut().forget(&rules, host))
+            .collect();
+        crate::alerts::withdraw(self, &cleared);
+        if !cleared.is_empty() {
+            let page = self.alerts_page.borrow().clone();
+            if let Some(page) = page {
+                page.refresh(self);
+            }
         }
         self.hub_states.borrow_mut().remove(id);
         self.live.borrow_mut().remove(id);
@@ -488,10 +503,9 @@ impl Fleet {
             let fresh = entry.state == ztop_desktop_core::HostState::Live;
             if let (true, Some(sample), Some(detail)) =
                 (fresh, entry.sample.clone(), fleet.detail.borrow().clone())
+                && detail.id == entry_id
             {
-                if detail.id == entry_id {
-                    detail.push(sample);
-                }
+                detail.push(sample);
             }
             // Alerts read the same result: metrics only from a live
             // sample, and unreachable once the freshness window passed.

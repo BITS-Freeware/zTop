@@ -238,10 +238,10 @@ impl Auth {
     /// [`MAX_WRONG_GUESSES`]th wrong guess burns the code, and the
     /// person at the machine starts a new pairing.
     pub fn pair(&mut self, code: &str, now_ms: u64) -> Result<String, AuthError> {
-        if let Some(last) = self.last_wrong_ms {
-            if now_ms < last.saturating_add(GUESS_SPACING.as_millis() as u64) {
-                return Err(AuthError::TooSoon);
-            }
+        if let Some(last) = self.last_wrong_ms
+            && now_ms < last.saturating_add(GUESS_SPACING.as_millis() as u64)
+        {
+            return Err(AuthError::TooSoon);
         }
         let matches = self.pending.as_ref().is_some_and(|pending| {
             pending.expires_ms > now_ms && same_code(pending.code.as_bytes(), code.as_bytes())

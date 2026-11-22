@@ -59,6 +59,22 @@ pub struct RemoteCollector {
     machine: Option<String>,
 }
 
+/// An error status over TLS, named for what it means. A refused token
+/// is a pairing problem and a busy agent asks for a retry, not a broken
+/// agent; any other error status is never read as an envelope.
+fn tls_status(status: u16) -> Result<(), CollectError> {
+    let what = match status {
+        401 => "a paired token (401): pair with --code",
+        429 => "a free history reader (429): try again shortly",
+        400.. => "a successful response",
+        _ => return Ok(()),
+    };
+    Err(CollectError::Unavailable {
+        origin: "agent",
+        what,
+    })
+}
+
 impl RemoteCollector {
     /// Point the collector at `host:port` with a five-second timeout,
     /// plain HTTP.
@@ -274,14 +290,7 @@ impl RemoteCollector {
             (Some(config), token) => {
                 let (status, text) =
                     https_get(&self.target, path, config, token.as_deref(), self.timeout)?;
-                // A refused token is a pairing problem, not a broken
-                // agent: say so instead of a generic failure.
-                if status == 401 {
-                    return Err(CollectError::Unavailable {
-                        origin: "agent",
-                        what: "a paired token (401): pair with --code",
-                    });
-                }
+                tls_status(status)?;
                 text
             }
             (None, _) => http_get(&self.target, path, self.timeout)?,
@@ -923,6 +932,20 @@ mod tests {
     /// Regression (audit M1): timeouts were per read, so a server that
     /// sent one byte just inside each timeout kept the fetch open
     /// forever. The deadline now covers the whole exchange.
+    #[test]
+    fn every_tls_error_status_is_an_error_and_says_what_it_is() {
+        let what = |status| match tls_status(status) {
+            Err(CollectError::Unavailable { what, .. }) => Some(what),
+            _ => None,
+        };
+        assert_eq!(what(200), None);
+        assert!(what(401).expect("401").contains("pair"));
+        assert!(what(429).expect("429").contains("try again"));
+        for status in [400, 404, 500, 503] {
+            assert_eq!(what(status), Some("a successful response"), "{status}");
+        }
+    }
+
     #[test]
     fn a_dripping_server_hits_the_overall_deadline() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");

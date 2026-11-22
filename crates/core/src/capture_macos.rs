@@ -89,11 +89,11 @@ pub(crate) fn hostinfo_text() -> Option<String> {
     }
     // Load average in kernel units (LOAD_SCALE = 1000), from the same
     // `vm.loadavg` sysctl the collector reads.
-    if let Some(raw) = sysctl_raw("vm.loadavg") {
-        if raw.len() >= 12 {
-            let v = |i: usize| i32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap()) as i64;
-            text.push_str(&format!("loadavg {} {} {}\n", v(0), v(1), v(2)));
-        }
+    if let Some(raw) = sysctl_raw("vm.loadavg")
+        && raw.len() >= 12
+    {
+        let v = |i: usize| i32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap()) as i64;
+        text.push_str(&format!("loadavg {} {} {}\n", v(0), v(1), v(2)));
     }
     // Virtual-memory counters (bytes).
     if let Some(vm) = vm_statistics() {
@@ -104,16 +104,16 @@ pub(crate) fn hostinfo_text() -> Option<String> {
     }
     // Swap from the `vm.swapusage` sysctl: an `xsw_usage` struct of three
     // u64 counters (total, avail, used) in bytes.
-    if let Some(raw) = sysctl_raw("vm.swapusage") {
-        if raw.len() >= 24 {
-            let u = |i: usize| u64::from_le_bytes(raw[i * 8..i * 8 + 8].try_into().unwrap());
-            text.push_str(&format!(
-                "swap total {} avail {} used {}\n",
-                u(0),
-                u(1),
-                u(2)
-            ));
-        }
+    if let Some(raw) = sysctl_raw("vm.swapusage")
+        && raw.len() >= 24
+    {
+        let u = |i: usize| u64::from_le_bytes(raw[i * 8..i * 8 + 8].try_into().unwrap());
+        text.push_str(&format!(
+            "swap total {} avail {} used {}\n",
+            u(0),
+            u(1),
+            u(2)
+        ));
     }
     // Boot time from kern.boottime (a struct timeval recorded as raw bytes).
     if let Some((sec, usec)) = boottime() {

@@ -121,8 +121,9 @@ fn open_detail_when_live(fleet: &Rc<Fleet>, name: String) {
 
 fn seed_alert(fleet: &Rc<Fleet>, spec: &str) {
     use ztop_desktop_core::alerts::{AlertKind, AlertRule};
-    let parts: Vec<&str> = spec.split('|').collect();
-    let [name, kind, threshold, seconds] = parts[..] else {
+    // Split from the right, so a rule name may itself contain `|`.
+    let parts: Vec<&str> = spec.rsplitn(4, '|').collect();
+    let [seconds, threshold, kind, name] = parts[..] else {
         eprintln!("ztop-desktop: an alert seed needs four fields: {spec}");
         return;
     };

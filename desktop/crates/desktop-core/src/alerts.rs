@@ -139,7 +139,7 @@ impl AlertRule {
 
 /// "45s", "5m".
 pub fn duration_text(seconds: u64) -> String {
-    if seconds >= 60 && seconds % 60 == 0 {
+    if seconds >= 60 && seconds.is_multiple_of(60) {
         format!("{}m", seconds / 60)
     } else {
         format!("{seconds}s")
@@ -220,6 +220,30 @@ impl AlertEngine {
         events
     }
 
+    /// Drops every track for `host`, a host the user removed, and
+    /// returns a `Cleared` event for each rule that was firing for it,
+    /// so its notification can be withdrawn.
+    pub fn forget(&mut self, rules: &[AlertRule], host: &str) -> Vec<AlertEvent> {
+        let mut events: Vec<AlertEvent> = self
+            .tracks
+            .iter()
+            .filter(|((_, h), track)| h == host && track.active)
+            .map(|((rule, _), _)| AlertEvent::Cleared {
+                rule: rule.clone(),
+                host: host.to_string(),
+                name: rules
+                    .iter()
+                    .find(|r| &r.id == rule)
+                    .map_or_else(String::new, |r| r.name.clone()),
+            })
+            .collect();
+        events.sort_by_key(|event| match event {
+            AlertEvent::Fired { rule, .. } | AlertEvent::Cleared { rule, .. } => rule.clone(),
+        });
+        self.tracks.retain(|(_, h), _| h != host);
+        events
+    }
+
     /// The hosts a rule is firing for now.
     pub fn firing(&self, rule: &str) -> Vec<String> {
         let mut hosts: Vec<String> = self
@@ -288,6 +312,39 @@ mod tests {
 
     fn rule(kind: AlertKind, threshold: f64, seconds: u64) -> AlertRule {
         AlertRule::new("hot", None, kind, threshold, seconds)
+    }
+
+    #[test]
+    fn a_removed_host_stops_firing_and_its_alerts_clear() {
+        let rules = [rule(AlertKind::Cpu, 80.0, 0)];
+        let mut engine = AlertEngine::default();
+        let now = Instant::now();
+        let hot = busy(95.0);
+        assert_eq!(
+            engine.evaluate(&rules, "a", Some(&hot), false, now).len(),
+            1
+        );
+        assert_eq!(
+            engine.evaluate(&rules, "b", Some(&hot), false, now).len(),
+            1
+        );
+        assert_eq!(
+            engine.forget(&rules, "a"),
+            [AlertEvent::Cleared {
+                rule: rules[0].id.clone(),
+                host: "a".into(),
+                name: "hot".into(),
+            }]
+        );
+        assert_eq!(
+            engine.firing(&rules[0].id),
+            ["b"],
+            "the other host keeps firing"
+        );
+        assert!(
+            engine.forget(&rules, "a").is_empty(),
+            "nothing is left to clear"
+        );
     }
 
     #[test]

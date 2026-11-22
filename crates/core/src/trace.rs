@@ -252,20 +252,57 @@ fn syscall_info(pid: libc::pid_t) -> Option<libc::ptrace_syscall_info> {
     (read > 0).then_some(info)
 }
 
-/// The signal to hand back when resuming (or detaching) from a stop.
-/// A stop that is not a syscall stop is a signal-delivery or event
-/// stop; real signals pass through unchanged. SIGTRAP and SIGSTOP
-/// belong to the tracer machinery itself, and event stops encode their
-/// kind in the stop-signal bits — not a deliverable signal.
+/// What a ptrace stop is, from its waitpid status and syscall info.
 #[cfg(target_os = "linux")]
-fn passed_signal(status: libc::c_int, info: Option<&libc::ptrace_syscall_info>) -> libc::c_int {
-    let syscall_stop = info.is_some_and(|info| info.op != libc::PTRACE_SYSCALL_INFO_NONE);
-    if syscall_stop {
-        return 0;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopKind {
+    /// A syscall entry or exit: resume with no signal.
+    Syscall,
+    /// A job-control stop (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU) taking
+    /// effect: under `PTRACE_SEIZE` it is reported as a
+    /// `PTRACE_EVENT_STOP`, and the tracee must stay stopped, so it is
+    /// resumed with `PTRACE_LISTEN`, which waits for SIGCONT.
+    GroupStop,
+    /// Any other event stop, such as the tracer's own interrupt: resume
+    /// with no signal.
+    Event,
+    /// A signal on its way to the tracee: hand it back so it arrives.
+    Signal(libc::c_int),
+}
+
+#[cfg(target_os = "linux")]
+fn stop_kind(status: libc::c_int, info: Option<&libc::ptrace_syscall_info>) -> StopKind {
+    if info.is_some_and(|info| info.op != libc::PTRACE_SYSCALL_INFO_NONE) {
+        return StopKind::Syscall;
     }
-    match libc::WSTOPSIG(status) {
-        libc::SIGTRAP | libc::SIGSTOP => 0,
-        sig if sig < 128 => sig,
+    let event = (status >> 16) & 0xff;
+    let signal = libc::WSTOPSIG(status);
+    if event == libc::PTRACE_EVENT_STOP {
+        return match signal {
+            libc::SIGSTOP | libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU => StopKind::GroupStop,
+            _ => StopKind::Event,
+        };
+    }
+    if event != 0 {
+        return StopKind::Event;
+    }
+    match signal {
+        // A syscall stop the info read missed (PTRACE_O_TRACESYSGOOD
+        // marks them SIGTRAP | 0x80), or a trap of the tracer's own.
+        libc::SIGTRAP => StopKind::Event,
+        sig if sig & 0x80 != 0 => StopKind::Syscall,
+        // SIGSTOP included: a seized tracee gets no SIGSTOP from the
+        // tracer, so one here was sent by someone and must arrive.
+        sig => StopKind::Signal(sig),
+    }
+}
+
+/// The signal to hand back when resuming (or detaching) from a stop:
+/// only a signal-delivery stop has one.
+#[cfg(target_os = "linux")]
+fn passed_signal(kind: StopKind) -> libc::c_int {
+    match kind {
+        StopKind::Signal(sig) => sig,
         _ => 0,
     }
 }
@@ -289,7 +326,8 @@ const DETACH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// Stop tracing a running tracee: interrupt it, wait for it to park,
 /// and detach from that stop. If it never parks (it exited, or the
 /// kernel delivered nothing), the detach is still attempted; the
-/// kernel also detaches when this thread's process exits.
+/// kernel also detaches when this tracer thread exits, which it does
+/// right after.
 #[cfg(target_os = "linux")]
 fn interrupt_and_detach(pid: libc::pid_t) {
     unsafe {
@@ -298,7 +336,7 @@ fn interrupt_and_detach(pid: libc::pid_t) {
     match wait_stopped(pid, None, Some(std::time::Instant::now() + DETACH_WAIT)) {
         Waited::Stopped(status) => {
             let info = syscall_info(pid);
-            detach(pid, passed_signal(status, info.as_ref()));
+            detach(pid, passed_signal(stop_kind(status, info.as_ref())));
         }
         Waited::Gone => {}
         Waited::StopRequested | Waited::TimedOut => detach(pid, 0),
@@ -365,17 +403,25 @@ fn trace_loop(
                 _ => {}
             }
         }
-        let signal = passed_signal(status, info.as_ref());
+        let kind = stop_kind(status, info.as_ref());
+        let signal = passed_signal(kind);
         // Parked right now, so a stop request detaches from this very
-        // stop instead of resuming first.
+        // stop instead of resuming first. Detaching from a group-stop
+        // leaves the tracee stopped, as job control expects.
         if stop.load(std::sync::atomic::Ordering::SeqCst) {
             detach(pid, signal);
             return;
         }
-        // Resume: step to the next syscall stop. Failures here mean the
-        // tracee died under us; the next waitpid says so.
+        // Resume: step to the next syscall stop, or, in a group-stop,
+        // listen, so the tracee stays stopped until SIGCONT (which
+        // reports another event stop, where stepping resumes). Failures
+        // here mean the tracee died under us; the next waitpid says so.
         unsafe {
-            libc::ptrace(libc::PTRACE_SYSCALL, pid, 0, signal as *mut libc::c_void);
+            if kind == StopKind::GroupStop {
+                libc::ptrace(libc::PTRACE_LISTEN, pid, 0, 0);
+            } else {
+                libc::ptrace(libc::PTRACE_SYSCALL, pid, 0, signal as *mut libc::c_void);
+            }
         }
     }
 }
@@ -745,6 +791,59 @@ mod tests {
     /// The tracer can start from one thread and be dropped from another
     /// (the TUI owns the handle; nothing pins it to the starting
     /// thread), and a start right after a drop attaches again.
+    /// A traced process stopped by job control stays stopped until
+    /// SIGCONT, and is traced again after it. The tracer used to
+    /// swallow SIGSTOP and resume group-stops, so a traced process
+    /// could not be suspended.
+    #[test]
+    fn a_traced_process_can_be_stopped_and_continued() {
+        let child = traceable_child();
+        let pid = child.id();
+        let finish = |mut child: std::process::Child| {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGCONT) };
+            child.kill().expect("kill the traced child");
+            let _ = child.wait();
+        };
+        let trace = match start(pid) {
+            Ok(trace) => trace,
+            Err(error) => {
+                eprintln!("skipping: the environment refuses the attach: {error}");
+                finish(child);
+                return;
+            }
+        };
+        let quiet_for = |trace: &TraceHandle, window: std::time::Duration| {
+            let end = std::time::Instant::now() + window;
+            let mut seen = 0;
+            while std::time::Instant::now() < end {
+                seen += trace.drain().len();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            seen
+        };
+        let busy_within = |trace: &TraceHandle| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while std::time::Instant::now() < end {
+                if !trace.drain().is_empty() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            false
+        };
+        assert!(busy_within(&trace), "the child makes syscalls while traced");
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) };
+        // Let the stop land and the last syscalls drain.
+        quiet_for(&trace, std::time::Duration::from_millis(300));
+        let stopped = quiet_for(&trace, std::time::Duration::from_millis(600));
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGCONT) };
+        let resumed = busy_within(&trace);
+        drop(trace);
+        finish(child);
+        assert_eq!(stopped, 0, "a stopped process makes no syscalls");
+        assert!(resumed, "SIGCONT resumes the traced process");
+    }
+
     #[test]
     fn a_process_can_be_traced_twice() {
         let child = traceable_child();

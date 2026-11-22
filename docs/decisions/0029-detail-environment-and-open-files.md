@@ -1,6 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-//! Decision 0029 — per-process detail reads: environment and open files
-//! (batch 7z), with the ptrace trace deferred.
+# 0029 — Per-process detail reads: environment and open files (batch 7z), with the ptrace trace deferred
 
 ## Context
 

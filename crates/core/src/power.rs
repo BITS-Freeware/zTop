@@ -100,3 +100,113 @@ mod tests {
         assert_eq!(busy_share_from_states(&states), Some(1.0));
     }
 }
+
+/// How long a thermal-pressure reading stays fresh. Pressure changes
+/// over tens of seconds, so asking `pmset` on every sample (every two
+/// seconds) only spends a process spawn each time.
+pub const THERMAL_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A value read at most once per `every`, kept in between.
+#[derive(Debug)]
+pub struct Every<T> {
+    every: std::time::Duration,
+    last: Option<(std::time::Instant, T)>,
+}
+
+impl<T: Clone> Every<T> {
+    pub fn new(every: std::time::Duration) -> Self {
+        Self { every, last: None }
+    }
+
+    /// The kept value while it is fresh; otherwise `read` runs once and
+    /// its answer is kept from `now`.
+    pub fn get(&mut self, now: std::time::Instant, read: impl FnOnce() -> T) -> T {
+        if let Some((at, value)) = &self.last
+            && now.saturating_duration_since(*at) < self.every
+        {
+            return value.clone();
+        }
+        let value = read();
+        self.last = Some((now, value.clone()));
+        value
+    }
+}
+
+/// Run `command` and return its standard output if it exits
+/// successfully within `timeout`. A command that runs longer is killed
+/// and reads as `None`, so a hung helper never stalls a sample.
+pub fn output_within(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut out = Vec::new();
+                child.stdout.take()?.read_to_end(&mut out).ok()?;
+                return status.success().then_some(out);
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod every_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_fresh_value_is_kept_and_a_stale_one_read_again() {
+        let mut reads = 0;
+        let mut every = Every::new(Duration::from_secs(30));
+        let start = Instant::now();
+        let mut read = |value| {
+            reads += 1;
+            value
+        };
+        assert_eq!(every.get(start, || read(1)), 1);
+        assert_eq!(every.get(start + Duration::from_secs(29), || read(2)), 1);
+        assert_eq!(every.get(start + Duration::from_secs(30), || read(3)), 3);
+        assert_eq!(reads, 2, "one read per window");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_hangs_is_killed_at_the_deadline() {
+        let mut sleep = std::process::Command::new("sleep");
+        sleep.arg("10");
+        let started = Instant::now();
+        assert_eq!(output_within(sleep, Duration::from_millis(200)), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait ends at the deadline"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_quick_command_returns_its_output() {
+        let mut echo = std::process::Command::new("echo");
+        echo.arg("ok");
+        assert_eq!(
+            output_within(echo, Duration::from_secs(5)).as_deref(),
+            Some(&b"ok\n"[..])
+        );
+    }
+}
