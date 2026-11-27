@@ -342,10 +342,13 @@ impl SmcConn {
 // yields a cooked sample whose IOReportSimpleGetIntegerValue reads the
 // cumulative counter, so the window energy is the difference of two
 // cooked readings. Channel names live in LegendChannel[2]; the channel
-// dicts in a sample carry no IOReportChannelName key. Dictionaries here
-// live for the life of the collector, like the collector itself.
+// dicts in a sample carry no IOReportChannelName key. The channel,
+// root and subscription dictionaries live as long as the collector and
+// are released when it drops; each refresh releases the sample it
+// replaces, so one sample is alive at a time.
 #[derive(Debug)]
 struct GpuEnergy {
+    channels: CFMutableDictionaryRef,
     root: CFDictionaryRef,
     subscription: CFMutableDictionaryRef,
     prev_sample: CFDictionaryRef,
@@ -371,19 +374,34 @@ impl GpuEnergy {
             let mut sub: CFMutableDictionaryRef = std::ptr::null_mut();
             let root =
                 IOReportCreateSubscription(TASK_NULL, channels, &mut sub, 0, std::ptr::null_mut());
+            // Every early return releases what was created so far: a
+            // collector that cannot start must not leak its setup.
+            let give_up = |samples: &[CFDictionaryRef]| {
+                for &sample in samples {
+                    CFRelease(sample as CFTypeRef);
+                }
+                if !sub.is_null() {
+                    CFRelease(sub as CFTypeRef);
+                }
+                if !root.is_null() {
+                    CFRelease(root as CFTypeRef);
+                }
+                CFRelease(channels as CFTypeRef);
+                None
+            };
             if root.is_null() || sub.is_null() {
-                return None;
+                return give_up(&[]);
             }
             // Baseline sample, then a cooked sample over a zero window:
             // cooked dicts carry LegendChannel names and readable values.
             let s1 = IOReportCreateSamples(root, sub, std::ptr::null_mut());
             if s1.is_null() {
-                return None;
+                return give_up(&[]);
             }
             let s2 = IOReportCreateSamples(root, sub, s1 as *mut _);
             CFRelease(s1 as CFTypeRef);
             if s2.is_null() {
-                return None;
+                return give_up(&[]);
             }
             let index = Self::gpu_index(s2);
             let value = match index {
@@ -391,9 +409,10 @@ impl GpuEnergy {
                 None => None,
             };
             if index.is_some() && value.is_none() {
-                return None;
+                return give_up(&[s2]);
             }
             Some(GpuEnergy {
+                channels,
                 root,
                 subscription: sub,
                 prev_sample: s2,
@@ -492,7 +511,10 @@ impl GpuEnergy {
         if cooked.is_null() {
             return None;
         }
-        self.prev_sample = cooked;
+        // The previous sample is replaced, so it is released: one
+        // sample lives at a time, not one per refresh.
+        let previous = std::mem::replace(&mut self.prev_sample, cooked);
+        unsafe { CFRelease(previous as CFTypeRef) };
         let index = self.index?;
         let value = Self::read_index(cooked, index)?;
         let elapsed = now.duration_since(self.prev_at).as_secs_f64();
@@ -601,6 +623,18 @@ impl GpuUtil {
     }
 }
 
+impl Drop for GpuEnergy {
+    /// The collector owns its setup and its one live sample.
+    fn drop(&mut self) {
+        unsafe {
+            CFRelease(self.prev_sample as CFTypeRef);
+            CFRelease(self.subscription as CFTypeRef);
+            CFRelease(self.root as CFTypeRef);
+            CFRelease(self.channels as CFTypeRef);
+        }
+    }
+}
+
 // ── Thermal pressure via pmset ───────────────────────────────────────
 /// Map `pmset -g therm` output to a pressure level (0 = none).
 ///
@@ -614,17 +648,13 @@ fn thermal_level(text: &str) -> Option<u8> {
     None
 }
 
-/// Run `pmset -g therm` and map it to a pressure level.
+/// Run `pmset -g therm`, killed after two seconds, and map it to a
+/// pressure level.
 fn thermal_pressure_level() -> Option<u8> {
-    let out = std::process::Command::new("pmset")
-        .arg("-g")
-        .arg("therm")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    thermal_level(&String::from_utf8_lossy(&out.stdout))
+    let mut pmset = std::process::Command::new("pmset");
+    pmset.arg("-g").arg("therm");
+    let out = power::output_within(pmset, std::time::Duration::from_secs(2))?;
+    thermal_level(&String::from_utf8_lossy(&out))
 }
 
 // ── Combined power collector ─────────────────────────────────────────
@@ -634,6 +664,8 @@ pub struct MacOsPower {
     gpu: Option<GpuEnergy>,
     gpu_util: Option<GpuUtil>,
     history: PowerHistory,
+    /// Thermal pressure, read at most every [`power::THERMAL_EVERY`].
+    thermal: power::Every<Option<u8>>,
 }
 
 impl Default for MacOsPower {
@@ -649,6 +681,7 @@ impl MacOsPower {
             gpu: GpuEnergy::new(),
             gpu_util: GpuUtil::new(),
             history: PowerHistory::new(),
+            thermal: power::Every::new(power::THERMAL_EVERY),
         }
     }
 
@@ -663,22 +696,23 @@ impl MacOsPower {
         }
 
         // GPU energy (delta-based, first sample is unavailable)
-        if let Some(ref mut gpu) = self.gpu {
-            if let Some(watts) = gpu.sample() {
-                sensors.gpu_watts = Metric::available(watts, Unit::Watts);
-            }
+        if let Some(ref mut gpu) = self.gpu
+            && let Some(watts) = gpu.sample()
+        {
+            sensors.gpu_watts = Metric::available(watts, Unit::Watts);
         }
 
         // GPU busy percent from the IORegistry (decision 0033): an
         // instantaneous estimate, available from the first sample.
-        if let Some(ref gpu_util) = self.gpu_util {
-            if let Some(percent) = gpu_util.busy_percent() {
-                silicon.gpu_busy_percent = Metric::available(percent, Unit::Percent);
-            }
+        if let Some(ref gpu_util) = self.gpu_util
+            && let Some(percent) = gpu_util.busy_percent()
+        {
+            silicon.gpu_busy_percent = Metric::available(percent, Unit::Percent);
         }
 
-        // Thermal pressure via `pmset -g therm` (decision 0033).
-        if let Some(level) = thermal_pressure_level() {
+        // Thermal pressure via `pmset -g therm` (decision 0033), at most
+        // every 30 seconds.
+        if let Some(level) = self.thermal.get(Instant::now(), thermal_pressure_level) {
             silicon.thermal_pressure = Metric::available(f64::from(level), Unit::Count);
         }
 

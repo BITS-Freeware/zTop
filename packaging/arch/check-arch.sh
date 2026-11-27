@@ -28,7 +28,7 @@ git config --global --add safe.directory "$PWD"
 git clone -q "$PWD" "$SRC/zTop"
 chown -R builder: "$SRC"
 su builder -c "cd '$SRC/zTop' && packaging/arch/makepkg-local.sh '$PKG'"
-FILE="$(ls "$SRC"/zTop/dist/arch/"$PKG"-[0-9]*.pkg.tar.zst | head -1)"
+FILE="$(ls "$SRC"/zTop/dist/arch/"$PKG"-[0-9]*.pkg.tar.* 2>/dev/null | grep -v '\.sig$' | head -1)"
 [ -f "$FILE" ] || fail "makepkg made no $PKG package"
 
 step "namcap finds no errors in the PKGBUILD or the package"
@@ -55,7 +55,8 @@ ztop-monitor)
     || fail "the packaged unit doesn't start /usr/bin/ztop"
   grep -q '^ExecStart=/usr/bin/ztop agent --tls --no-advertise ' /usr/lib/systemd/system/ztop-agent.service \
     || fail "the system unit doesn't start /usr/bin/ztop"
-  ! grep -hv '^[[:space:]]*#' /usr/lib/systemd/system/ztop-agent.service /etc/default/ztop-agent \
+  # systemd treats lines starting with # or ; as comments.
+  ! grep -hv '^[[:space:]]*[#;]' /usr/lib/systemd/system/ztop-agent.service /etc/default/ztop-agent \
       | grep -Eq -- '--pair|--allow-control|--allow-manage' \
     || fail "the system agent must never pair or grant control or management"
   getent passwd ztop >/dev/null || fail "pacman's sysusers hook made no ztop user"

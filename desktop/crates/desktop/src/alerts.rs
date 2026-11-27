@@ -41,6 +41,19 @@ pub fn announce(fleet: &Fleet, event: &AlertEvent, host_name: &str) {
     }
 }
 
+/// Withdraws the notifications of alerts that were firing for a host
+/// the user removed, without a toast: nothing cleared, the host went.
+pub fn withdraw(fleet: &Fleet, events: &[AlertEvent]) {
+    let Some(application) = fleet.window.application() else {
+        return;
+    };
+    for event in events {
+        if let AlertEvent::Cleared { rule, host, .. } = event {
+            application.withdraw_notification(&notification_id(rule, host));
+        }
+    }
+}
+
 fn notification_id(rule: &str, host: &str) -> String {
     format!("alert-{rule}-{host}")
 }

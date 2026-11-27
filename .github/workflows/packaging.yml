@@ -13,6 +13,8 @@ on:
     paths:
       - 'packaging/**'
       - '.github/workflows/packaging.yml'
+      - 'crates/**'
+      - 'Cargo.lock'
       - 'scripts/measure-agent.sh'
   # A release: build the packages from main, then publish this run's artifacts (decision 0074).
   workflow_dispatch:

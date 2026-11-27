@@ -36,6 +36,10 @@ pub struct ProcessTable {
     /// A row's menu is open: the table holds still so the row under
     /// the pointer is the row the signal goes to.
     holding: Cell<bool>,
+    /// The process a row's menu was opened on, taken when it opened.
+    /// Closing the menu redraws the rows before the click is handled,
+    /// so the click never reads its target from the row itself.
+    menu_target: RefCell<Option<(u32, String)>>,
     record: HostRecord,
     token: Option<String>,
     toasts: adw::ToastOverlay,
@@ -116,6 +120,7 @@ impl ProcessTable {
             processes: RefCell::default(),
             catalog: RefCell::default(),
             holding: Cell::new(false),
+            menu_target: RefCell::default(),
             record: record.clone(),
             token,
             toasts: toasts.clone(),
@@ -154,19 +159,18 @@ impl ProcessTable {
             }));
             table.redraw();
         });
-        for row in &table.rows {
+        for (index, row) in table.rows.iter().enumerate() {
             let popover = gtk::Popover::new();
             let weak = Rc::downgrade(&table);
             popover.connect_show(move |_| {
                 if let Some(table) = weak.upgrade() {
-                    table.holding.set(true);
+                    table.menu_opened(index);
                 }
             });
             let weak = Rc::downgrade(&table);
             popover.connect_closed(move |_| {
                 if let Some(table) = weak.upgrade() {
-                    table.holding.set(false);
-                    table.redraw();
+                    table.menu_closed();
                 }
             });
             row.menu.set_popover(Some(&popover));
@@ -225,7 +229,7 @@ impl ProcessTable {
                 .and_then(Result::ok)
                 .unwrap_or_default();
             let Some(table) = weak.upgrade() else { return };
-            for (index, row) in table.rows.iter().enumerate() {
+            for row in &table.rows {
                 let Some(popover) = row.menu.popover() else {
                     continue;
                 };
@@ -239,9 +243,10 @@ impl ProcessTable {
                     let (weak, signal, popover_ref) =
                         (Rc::downgrade(&table), signal.clone(), popover.clone());
                     button.connect_clicked(move |_| {
+                        let target = weak.upgrade().and_then(|table| table.menu_target());
                         popover_ref.popdown();
-                        if let Some(table) = weak.upgrade() {
-                            table.chosen(index, &signal);
+                        if let (Some(table), Some((pid, name))) = (weak.upgrade(), target) {
+                            table.chosen(pid, name, &signal);
                         }
                     });
                     items.append(&button);
@@ -253,12 +258,29 @@ impl ProcessTable {
         });
     }
 
-    /// A signal was picked from row `index`'s menu.
-    fn chosen(self: &Rc<Self>, index: usize, signal: &Signal) {
-        let Some(row) = self.rows.get(index) else {
-            return;
-        };
-        let (pid, name) = (row.pid.get(), row.process_name.borrow().clone());
+    /// Row `index`'s menu opened: hold the rows still and remember the
+    /// process it was opened on.
+    fn menu_opened(&self, index: usize) {
+        self.holding.set(true);
+        *self.menu_target.borrow_mut() = self
+            .rows
+            .get(index)
+            .map(|row| (row.pid.get(), row.process_name.borrow().clone()));
+    }
+
+    /// The menu closed: let the rows follow the list again.
+    fn menu_closed(&self) {
+        self.holding.set(false);
+        self.redraw();
+    }
+
+    /// The process the open (or just closed) menu belongs to.
+    fn menu_target(&self) -> Option<(u32, String)> {
+        self.menu_target.borrow().clone()
+    }
+
+    /// A signal was picked from the menu opened on process `pid`.
+    fn chosen(self: &Rc<Self>, pid: u32, name: String, signal: &Signal) {
         if !signal.needs_confirmation() {
             self.send(pid, name, signal.clone());
             return;
@@ -275,10 +297,10 @@ impl ProcessTable {
         dialog.set_close_response("cancel");
         let (weak, signal): (Weak<Self>, Signal) = (Rc::downgrade(self), signal.clone());
         dialog.connect_response(None, move |_, response| {
-            if response == "kill" {
-                if let Some(table) = weak.upgrade() {
-                    table.send(pid, name.clone(), signal.clone());
-                }
+            if response == "kill"
+                && let Some(table) = weak.upgrade()
+            {
+                table.send(pid, name.clone(), signal.clone());
             }
         });
         dialog.present(Some(&self.group));
@@ -379,5 +401,52 @@ impl Row {
             .set_label(&format!("{:.1}%", process.mem_percent));
         self.pid.set(process.pid);
         *self.process_name.borrow_mut() = process.name.clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(pid: u32, name: &str, cpu: f64) -> Process {
+        serde_json::from_value(serde_json::json!({
+            "pid": pid, "parent": null, "user": "alice", "state": "S", "name": name,
+            "cpu_percent": cpu, "mem_percent": 0.0, "virtual_bytes": 0,
+            "resident_bytes": 0, "threads": 1,
+            "io": { "read_bytes": null, "write_bytes": null, "read_rate": null, "write_rate": null },
+        }))
+        .expect("a process")
+    }
+
+    /// Needs a display. CI runs the tests under xvfb and sets
+    /// `ZTOP_TEST_DISPLAY=1`; elsewhere the test says so and passes.
+    #[test]
+    fn a_signal_goes_to_the_process_the_menu_was_opened_on() {
+        if std::env::var("ZTOP_TEST_DISPLAY").as_deref() != Ok("1") {
+            eprintln!("skipping: set ZTOP_TEST_DISPLAY=1 with a display (xvfb-run)");
+            return;
+        }
+        adw::init().expect("GTK and libadwaita on the test display");
+        let record = HostRecord::new("host-a", "127.0.0.1", 9, "");
+        let table = ProcessTable::new(&record, None, &adw::ToastOverlay::new());
+        table.show(&[process(10, "busy", 50.0), process(20, "idle", 1.0)]);
+        // The menu opens on the first row, the busiest process.
+        table.menu_opened(0);
+        // A refresh arrives while the menu is open: the other process
+        // is busiest now.
+        table.show(&[process(10, "busy", 1.0), process(20, "idle", 50.0)]);
+        // Clicking a signal closes the menu, which redraws the rows
+        // before the click is handled.
+        table.menu_closed();
+        assert_eq!(
+            table.rows[0].pid.get(),
+            20,
+            "the row now shows the other process"
+        );
+        assert_eq!(
+            table.menu_target(),
+            Some((10, "busy".to_string())),
+            "the signal still goes to the process the menu was opened on"
+        );
     }
 }

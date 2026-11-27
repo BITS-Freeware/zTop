@@ -4,12 +4,14 @@ Updated after every working session.
 
 - **Current milestone:** zTop for Linux, L5 (packaging), after the 0.1.2 release.
 - **Last done:** zTop for Linux L2 (host detail, decision 0077), L3 (processes and control, decision 0067) and L4 (hub, Bonjour, alerts, decision 0075).
-- **Next step:** L5; a recorded detail run on a machine with temperature sensors and fans; measure the agent's budget over a full hour on a busy macOS and Linux host, and record it; then the audit's low findings.
+- **Next step:** the outside security review; L5; a recorded detail run on a machine with temperature sensors and fans; measure the agent's budget over a full hour on a busy macOS and Linux host, and record it; then the audit's low findings.
 - **Blocked on:** nothing.
 
 ## Log
 
 Newest first. One or two lines per session: what changed, what is next.
+
+- 2026-11-22 (second review): Fixed the 11 real findings of an automated whole-tree review, with a regression test for each that CI can run (decision 0078): the desktop signal menu's target, the macOS GPU sample leak, `pmset` cached and timed out, macOS open-file paths, `--delay` NaN, TLS error statuses, a 1-in-256 flaky test, alerts of removed hosts, duplicate temperature labels, job control under the tracer, and the state directory's owner check. `rust-version` is 1.94, linted on Linux and macOS. Desktop tests now run under `xvfb-run`. Next: the outside security review.
 
 - 2026-11-19 (Arch): An Arch package, `ztop-monitor` (the AUR's `ztop` is another program), built from a release tag or a checkout with `packaging/arch/makepkg-local.sh`; CI builds, lints, installs, pairs with and removes it in an `archlinux` container (decision 0076). It ships the user agent and, like the `.deb`, the system agent for servers. Next: test on two Omarchy machines, then the desktop app's `ztop-desktop` package and the first AUR upload.
 

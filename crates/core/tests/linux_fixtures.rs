@@ -66,14 +66,14 @@ fn times_from_ticks(ticks: &[f64]) -> CpuTimes {
 /// One numeric `meminfo` value, in KiB as recorded.
 fn meminfo_kib(meminfo: &str, key: &str) -> u64 {
     for line in meminfo.lines() {
-        if let Some((field, value)) = line.split_once(':') {
-            if field.trim() == key {
-                let kib = value
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_else(|| panic!("meminfo: {key} has no value"));
-                return kib.parse().unwrap_or_else(|_| panic!("meminfo: {key}"));
-            }
+        if let Some((field, value)) = line.split_once(':')
+            && field.trim() == key
+        {
+            let kib = value
+                .split_whitespace()
+                .next()
+                .unwrap_or_else(|| panic!("meminfo: {key} has no value"));
+            return kib.parse().unwrap_or_else(|_| panic!("meminfo: {key}"));
         }
     }
     panic!("meminfo is missing {key}");

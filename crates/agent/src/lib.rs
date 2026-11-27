@@ -776,10 +776,10 @@ async fn stream(State(state): State<Arc<AgentState>>, upgrade: WebSocketUpgrade)
 /// broadcast queue overflows) rather than slowing the sampler down.
 async fn stream_loop(state: Arc<AgentState>, mut socket: WebSocket) {
     let mut receiver = state.sender.subscribe();
-    if let Some(sample) = state.latest() {
-        if send_sample(&mut socket, &sample).await.is_err() {
-            return;
-        }
+    if let Some(sample) = state.latest()
+        && send_sample(&mut socket, &sample).await.is_err()
+    {
+        return;
     }
     loop {
         match receiver.recv().await {
@@ -920,10 +920,10 @@ mod tests {
         let browser = daemon.browse("_ztop._tcp.local.").expect("browser");
         let found = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while let Ok(event) = browser.recv_async().await {
-                if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
-                    if info.get_fullname().starts_with("ztop on ") {
-                        return true;
-                    }
+                if let mdns_sd::ServiceEvent::ServiceResolved(info) = event
+                    && info.get_fullname().starts_with("ztop on ")
+                {
+                    return true;
                 }
             }
             false
@@ -1911,8 +1911,17 @@ mod tests {
         .await;
         assert_eq!(status, 401, "TLS means tokens are enforced");
 
-        // A wrong pin cannot even complete the handshake.
-        let wrong_pin = format!("{}00", &fingerprint_hex[..62]);
+        // A wrong pin cannot even complete the handshake. The first hex
+        // character is replaced by a different one, so the pin always
+        // differs (appending "00" rebuilt the real pin whenever its
+        // tail was "00", about one run in 256).
+        let flipped = if fingerprint_hex.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        };
+        let wrong_pin = format!("{flipped}{}", &fingerprint_hex[1..]);
+        assert_ne!(wrong_pin, fingerprint_hex);
         let result = tls_request(
             address_string.parse().expect("addr"),
             &wrong_pin,

@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- zTop for Linux sends a signal to the process its menu was opened on, even when the list refreshed while the menu was open (decision 0078).
+- The state directory must be owned by the user running ztop, checked after it is created.
 - The protocol client parses responses as bytes (a crafted response could panic it), reads at most 32 MiB, and gives each fetch one overall deadline.
 - Agent history answers cover at most an hour, and at most two are built at once.
 - The TLS key, the state directory and the hub's history database are private (0600 and 0700) from the moment they exist; the tokens file is written atomically, and a corrupt one is moved aside loudly instead of silently disabling persistence.
@@ -24,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The macOS agent no longer leaks a GPU energy sample every two seconds, reads thermal pressure at most every 30 seconds with a timeout, and shows the paths of open files (decision 0078).
+- A traced process can be stopped and continued with job control.
+- `--delay nan` and `--delay inf` are refused instead of crashing.
+- Over TLS, error statuses other than 401 are reported as errors, and 429 says to try again.
+- zTop for Linux clears a removed host's alerts and draws one temperature line per sensor label.
+- Rust 1.94 is the declared minimum toolchain, as `sqlx` 0.9 already required.
 - The hub's windows, pruning and latest sample go by the hub's own clock.
 - The live Linux collector reads only the sensor and battery files it uses.
 - A failed mDNS start no longer crashes the agent.

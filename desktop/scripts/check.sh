@@ -3,7 +3,8 @@
 # Everything CI's Desktop job runs for the Linux desktop app, on any Linux box
 # with the packages in desktop/README.md: the ztop binary (the
 # live tests and the recorded run spawn it), format and lint, the
-# tests (live agents, and the Secret Service store against a throwaway
+# tests (live agents, the process table on a virtual display, and the
+# Secret Service store against a throwaway
 # gnome-keyring in its own D-Bus session), then the recorded run with
 # two paired agents, on the fleet and on a host's detail page, and three
 # agents read through one hub, and an alert firing when an agent stops.
@@ -43,7 +44,7 @@ trap 'rm -rf "$KEYHOME"' EXIT
 mkdir -p "$KEYHOME/.cache"
 run test env HOME="$KEYHOME" dbus-run-session -- sh -c '
     eval "$(printf test | gnome-keyring-daemon --unlock --components=secrets)"
-    ZTOP_TEST_KEYRING=1 cargo test --manifest-path desktop/Cargo.toml'
+    ZTOP_TEST_KEYRING=1 ZTOP_TEST_DISPLAY=1 xvfb-run -a cargo test --manifest-path desktop/Cargo.toml'
 run recorded-run desktop/scripts/recorded-run.sh "$KEYHOME/overview.png"
 run recorded-detail env DETAIL=host-a SNAPSHOT_AFTER=12 desktop/scripts/recorded-run.sh "$KEYHOME/detail.png"
 run recorded-hub desktop/scripts/recorded-hub-run.sh "$KEYHOME/hub.png"

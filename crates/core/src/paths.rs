@@ -41,19 +41,30 @@ pub fn state_dir_with(home: Option<&OsStr>, xdg: Option<&OsStr>) -> Option<PathB
 /// Create `dir` and any missing parents, each new one mode 0700 on
 /// unix, so ztop's state (tokens, keys, history) is never readable by
 /// other users, not even for the moment between a create and a chmod.
-/// An existing directory is tightened to 0700 when it is ztop's own
-/// state directory or inside it; other existing parents are left alone.
+/// When `dir` is ztop's own state directory or inside it, it must be
+/// owned by this user (or the user must be root), and an existing one is tightened to 0700; other
+/// existing parents are left alone. The check runs after the create,
+/// whoever made the directory, so one that appears between a probe and
+/// the create cannot skip it.
 pub fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        let existed = dir.is_dir();
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(dir)?;
-        if existed && is_ours(dir) {
-            let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+        if is_ours(dir) {
+            // Root (a `sudo` that keeps HOME) may use the user's own.
+            let meta = std::fs::metadata(dir)?;
+            let euid = unsafe { libc::geteuid() };
+            if !meta.is_dir() || (meta.uid() != euid && euid != 0) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("{} is not a directory owned by this user", dir.display()),
+                ));
+            }
+            let mode = meta.permissions().mode() & 0o777;
             if mode & 0o077 != 0 {
                 std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
             }

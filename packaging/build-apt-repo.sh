@@ -16,10 +16,11 @@
 # Only InRelease, Release, and Release.gpg change from one release to the next: apt fetches
 # the indexes by hash (Acquire-By-Hash), so a cached old index can't be mistaken for the new.
 # The indexes list the packages given here, which should be the newest build for each
-# architecture; older packages stay downloadable in the pool.
+# architecture. DIR starts empty and holds only those packages, so upload it by adding files,
+# never by a sync that deletes: older packages then stay downloadable in the pool.
 set -euo pipefail
 
-usage() { sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 OUT=""; KEY=""; DEBS=()
 while [ $# -gt 0 ]; do
   case "$1" in

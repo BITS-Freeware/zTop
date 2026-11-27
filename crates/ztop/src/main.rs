@@ -142,13 +142,18 @@ enum Command {
 /// Build the run flags from the CLI; `readonly` is passed in so
 /// `connect` can force observation-only regardless of the flag.
 fn flags_from(cli: &Cli, readonly: bool) -> Result<ztop_tui::RunFlags, Box<dyn Error>> {
-    if cli.delay < ztop_tui::MIN_DELAY.as_secs_f64() {
-        return Err(format!(
-            "delay must be at least {} seconds",
-            ztop_tui::MIN_DELAY.as_secs_f64()
-        )
-        .into());
-    }
+    // NaN compares false with everything and infinity (or a huge
+    // value) does not fit a Duration, so both are refused here rather
+    // than reaching Duration's panic.
+    let delay = std::time::Duration::try_from_secs_f64(cli.delay)
+        .ok()
+        .filter(|delay| *delay >= ztop_tui::MIN_DELAY)
+        .ok_or_else(|| {
+            format!(
+                "delay must be a number of seconds, at least {}",
+                ztop_tui::MIN_DELAY.as_secs_f64()
+            )
+        })?;
     Ok(ztop_tui::RunFlags {
         readonly,
         user: cli.user.clone(),
@@ -156,7 +161,7 @@ fn flags_from(cli: &Cli, readonly: bool) -> Result<ztop_tui::RunFlags, Box<dyn E
             Some(name) => Some(name.parse()?),
             None => None,
         },
-        delay: std::time::Duration::from_secs_f64(cli.delay),
+        delay,
     })
 }
 
@@ -396,6 +401,19 @@ fn run() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn a_delay_that_is_not_a_duration_is_refused() {
+        for delay in ["nan", "inf", "-inf", "1e300", "0.01"] {
+            let flag = format!("--delay={delay}");
+            let cli = Cli::try_parse_from(["ztop", flag.as_str()]).expect("parses");
+            let error = flags_from(&cli, false).expect_err(delay).to_string();
+            assert!(error.contains("delay must be"), "{delay}: {error}");
+        }
+        let cli = Cli::try_parse_from(["ztop", "--delay", "2.5"]).expect("parses");
+        let flags = flags_from(&cli, false).expect("a normal delay");
+        assert_eq!(flags.delay, std::time::Duration::from_millis(2500));
+    }
 
     #[test]
     fn no_subcommand_is_the_tui() {

@@ -200,8 +200,10 @@ unsafe extern "C" {
 
 #[cfg(target_os = "macos")]
 const PROC_PIDLISTFDS: u32 = 1;
+/// The vnode flavor that carries the path (`vnode_fdinfowithpath`);
+/// flavor 1, `PROC_PIDFDVNODEINFO`, has no path in it.
 #[cfg(target_os = "macos")]
-const PROC_PIDFDVNODEINFO: i32 = 1;
+const PROC_PIDFDVNODEPATHINFO: i32 = 2;
 
 #[cfg(target_os = "macos")]
 fn macos_files(pid: u32) -> Result<Vec<String>, String> {
@@ -259,16 +261,18 @@ fn vnode_path(pid: i32, fd: i32) -> Option<String> {
         proc_pidfdinfo(
             pid,
             fd,
-            PROC_PIDFDVNODEINFO,
+            PROC_PIDFDVNODEPATHINFO,
             buffer.as_mut_ptr().cast(),
             buffer.len() as i32,
         )
     };
-    if filled <= 0 {
+    // The path is the last MAXPATHLEN bytes of the record the call
+    // filled, which is shorter than the buffer, as a C string.
+    let filled = usize::try_from(filled).ok()?.min(buffer.len());
+    if filled < MAXPATHLEN {
         return None;
     }
-    // The path is the record's last MAXPATHLEN bytes as a C string.
-    let tail = &buffer[buffer.len() - MAXPATHLEN..];
+    let tail = &buffer[filled - MAXPATHLEN..filled];
     let len = tail.iter().position(|b| *b == 0)?;
     if len == 0 {
         return None;
@@ -310,6 +314,25 @@ mod tests {
         let mut sorted = numbers.clone();
         sorted.sort_unstable();
         assert_eq!(numbers, sorted, "rows are sorted by fd");
+    }
+
+    #[test]
+    fn an_open_file_shows_its_path() {
+        // macOS once asked for the vnode flavor without a path and read
+        // the path from the wrong offset, so no row ever had one.
+        let path = std::env::temp_dir().join(format!("ztop-open-file-{}", std::process::id()));
+        let file = std::fs::File::create(&path).expect("a temp file");
+        let shown = path.canonicalize().expect("the temp file's real path");
+        let lines = open_files(std::process::id()).expect("own fds");
+        drop(file);
+        std::fs::remove_file(&path).ok();
+        let wanted = shown.to_string_lossy().into_owned();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.ends_with(&format!("-> {wanted}"))),
+            "the open temp file is listed with its path: {lines:?}"
+        );
     }
 
     #[test]

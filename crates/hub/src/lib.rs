@@ -96,14 +96,13 @@ impl HubConfig {
             if !seen.insert(agent.name.as_str()) {
                 return Err(format!("agent {} is listed twice", agent.name));
             }
-            if let Some(pin) = &agent.pin {
-                if ztop_core::client::RemoteCollector::tls(agent.target.clone(), pin, None).is_err()
-                {
-                    return Err(format!(
-                        "agent {}: pin must look like what the agent prints: SHA256:<64 hex>",
-                        agent.name
-                    ));
-                }
+            if let Some(pin) = &agent.pin
+                && ztop_core::client::RemoteCollector::tls(agent.target.clone(), pin, None).is_err()
+            {
+                return Err(format!(
+                    "agent {}: pin must look like what the agent prints: SHA256:<64 hex>",
+                    agent.name
+                ));
             }
         }
         Ok(())

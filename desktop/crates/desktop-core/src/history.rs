@@ -196,7 +196,10 @@ impl History {
             .map(|t| (t.label.as_str(), t.celsius.value))
             .collect();
         sensors.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
-        sensors.dedup_by(|a, b| a.0 == b.0);
+        // One line per label, its hottest reading: sensors sharing a
+        // label are not next to each other once sorted by heat.
+        let mut seen = std::collections::HashSet::new();
+        sensors.retain(|(label, _)| seen.insert(*label));
         sensors
             .into_iter()
             .take(limit)
@@ -403,9 +406,26 @@ mod tests {
         );
         assert_eq!(temps[0].points, vec![(1.0, 50.0), (0.0, 61.0)]);
         assert_eq!(history.temperatures(1).len(), 1);
+        // Two sensors sharing a label, with another between them by
+        // heat, still make one line.
+        let mut shared = reading(2, 70.0, 45.0, 1500.0);
+        shared.sensors.temps.push(TempSensor {
+            label: "cpu".into(),
+            celsius: Metric::available(30.0, Unit::Celsius),
+        });
+        history.extend([shared]);
+        let labels: Vec<String> = history
+            .temperatures(6)
+            .into_iter()
+            .map(|l| l.label)
+            .collect();
+        assert_eq!(labels, ["cpu", "nvme"], "one line per label");
         let fans = history.fans();
         assert_eq!(fans[0].label, "fan1");
-        assert_eq!(fans[0].points, vec![(1.0, 1200.0), (0.0, 1500.0)]);
+        assert_eq!(
+            fans[0].points,
+            vec![(2.0, 1200.0), (1.0, 1500.0), (0.0, 1500.0)]
+        );
     }
 
     #[test]
